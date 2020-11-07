@@ -26,7 +26,7 @@
 	};
 
 	chosen {
-		bootargs = "console=ttySAC2,115200 clk_ignore_unused androidboot.hardware=samsungexynos7570 androidboot.selinux=disabled firmware_class.path=/vendor/firmware ess_setup=0x46000000 bcm_setup=0xffffff80f8e00000 androidboot.debug_level=0x4948 reserve-fimc=0";
+		bootargs = "console=ttySAC2,115200 clk_ignore_unused androidboot.hardware=samsungexynos7570 androidboot.selinux=permissive firmware_class.path=/vendor/firmware ess_setup=0x46000000 bcm_setup=0xffffff80f8e00000 androidboot.debug_level=0x4948 reserve-fimc=0";
 		linux,initrd-start = <0x42000000>;
 		linux,initrd-end = <0x421FFFFF>;
 	};
