@@ -49,10 +49,9 @@ jobs:
           command: |
             ZIPNAME="RedLine-$(date +%d_%m_%Y_%H_%M)-j4ltejx.zip"
             cd ~/kernel
-            cd RedLine/redline
+            cd RedLine
             cp ~/AIK-Linux/boot.img .
             cp ~/AIK-Linux/dtb.img .
-            cd ../
             sudo zip -r9 $ZIPNAME *
             curl -F chat_id=$CHAT_ID -F document=@$ZIPNAME -F parse_mode=markdown https://api.telegram.org/bot$BOT_TOKEN/sendDocument
 
