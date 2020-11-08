@@ -1,14 +1,59 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine. See: https://circleci.com/docs/2.0/configuration-reference
 version: 2.1
-# Use a package of configuration called an orb.
-orbs:
-  # Declare a dependency on the welcome-orb
-  welcome: circleci/welcome-orb@0.4.1
-# Orchestrate or schedule a set of jobs
-workflows:
-  # Name the workflow "welcome"
-  welcome:
-    # Run the welcome/run job in its own container
-    jobs:
-      - welcome/run
+jobs:
+  RedLine-j4ltejx:
+   docker:
+      - image: ubuntu:18.04
+   steps:
+      - run:
+          name: Preparing Environment
+          no_output_timeout: 20m
+          command: |
+           export TERM=xterm
+           apt-get update -y && ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime && apt-get install bison build-essential curl flex git gnupg gperf liblz4-tool libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools xsltproc zip zlib1g-dev build-essential kernel-package libncurses5-dev bzip2 git python wget gcc g++ curl sudo -y
 
+      - run:
+          name: Downloading dependencies & source
+          no_output_timeout: 20m
+          command: |
+            cd ~
+            git clone https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME --depth=1 kernel
+            git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b ndk-release-r17 --depth=1 toolchain
+
+      - run:
+          name: Compiling
+          no_output_timeout: 20m
+          command: |
+            export CROSS_COMPILE=$HOME/toolchain/bin/aarch64-linux-android-
+            cd ~/kernel
+            make clean && make mrproper
+            make redline_defconfig
+            make -j$(nproc --all)
+
+      - run:
+          name: Unpack & Repack
+          no_output_timeout: 20m
+          command: |
+            cd ~
+            git clone https://github.com/redline-dev/AIK-Linux -b j4ltejx && cd AIK-Linux
+            ./unpackimg.sh
+            cd split_img
+            rm boot.img-zImage boot.img-dt
+            cp ~/kernel/arch/arm64/boot/Image boot.img-zImage && cp ~/kernel/arch/arm64/boot/dtb.img boot.img-dt && cp boot.img-dt ../dtb.img
+            cd ..
+            ./repackimg.sh
+            rm boot.img && mv image-new.img boot.img
+
+      - run:
+          name: Send to telegram
+          no_output_timeout: 20m
+          command: |
+            cd ~/AIK-Linux
+            ZIPNAME="RedLine-$(date +%d_%m_%Y_%H_%M)-j4ltejx.zip"
+            sudo zip -r9 $ZIPNAME boot.img dtb.img
+            curl -F chat_id=$CHAT_ID -F document=@$ZIPNAME -F parse_mode=markdown https://api.telegram.org/bot$BOT_TOKEN/sendDocument
+
+workflows:
+  version: 2.1
+  cooking:
+    jobs:
+      - RedLine-j4ltejx
