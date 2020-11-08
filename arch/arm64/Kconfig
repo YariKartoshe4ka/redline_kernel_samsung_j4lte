@@ -224,7 +224,11 @@ config ARCH_XGENE
 menu "Samsung Exynos"
 config ARCH_EXYNOS
 	bool
-	
+
+config SAMSUNG_PRODUCT_SHIP
+	bool "set up for product shipping"
+	default n
+
 menuconfig EXYNOS_DTBTOOL
 	bool "Build dtbtool for Exynos"
 	select DTC
