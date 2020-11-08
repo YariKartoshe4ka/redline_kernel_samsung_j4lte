@@ -2325,17 +2325,17 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 	sinfo->filled |= STATION_INFO_BSS_PARAM;
 
 	if (!psta->no_short_preamble_set)
-	sinfo->bss_param.flags |= STATION_INFO_BSS_PARAM_SHORT_PREAMBLE;
+	sinfo->bss_param.flags |= NL80211_STA_BSS_PARAM_SHORT_PREAMBLE;
 
 	if (!psta->no_short_slot_time_set)
-	  sinfo->bss_param.flags |= STATION_INFO_BSS_PARAM_SHORT_SLOT_TIME;
+	  sinfo->bss_param.flags |= NL80211_STA_BSS_PARAM_SHORT_SLOT_TIME;
 
 	/* no idea how to check this yet */
 	if (0)
-	sinfo->bss_param.flags |= STATION_INFO_BSS_PARAM_CTS_PROT;
+	sinfo->bss_param.flags |= NL80211_STA_BSS_PARAM_CTS_PROT;
 
 	/* is this actually the dtim_period? */
-	sinfo->bss_param.flags |= STATION_INFO_BSS_PARAM_DTIM_PERIOD;
+	sinfo->bss_param.flags |= NL80211_STA_BSS_PARAM_DTIM_PERIOD;
 	sinfo->bss_param.dtim_period = pwrctl->dtim;
 
 	sinfo->bss_param.beacon_interval = get_beacon_interval(&cur_network->network);
