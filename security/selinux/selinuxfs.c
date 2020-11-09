@@ -173,8 +173,9 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 	if (sscanf(page, "%d", &new_value) != 1)
 		goto out;
 
-	/* Force permissive */
-	new_value = 0;
+	/* Don't force permissive
+	 * Let user select the SELinux them own
+	 * new_value = 0; */
 
 	if (new_value != selinux_enforcing) {
 		length = task_has_security(current, SECURITY__SETENFORCE);
