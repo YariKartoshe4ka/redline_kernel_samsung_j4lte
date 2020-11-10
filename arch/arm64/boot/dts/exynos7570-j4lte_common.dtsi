@@ -340,7 +340,7 @@
 		default_ptat_cont = <0x1>;
 
 		/* gpu cooling related table */
-		gpu_idx_num = <7>;
+		gpu_idx_num = <8>;
 		/* flags, driver_data(index), frequency */
 		gpu_cooling_table = < 0 0 1146000
 				      0 1 1001000
@@ -348,7 +348,8 @@
 				      0 3 666000
 				      0 4 553000
 				      0 5 415000
-				      0 6 TABLE_END>;
+				      0 6 350000
+				      0 7 TABLE_END>;
 	};
 
 	pinctrl@139F0000 {
