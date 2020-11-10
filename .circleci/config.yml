@@ -47,7 +47,7 @@ jobs:
           name: Create flashable zip
           command: |
             cd ~ && git clone https://github.com/redline-dev/RedLine-Flashable && cd RedLine-Flashable
-            mkdir RedLine-stuff
+            mkdir -p RedLine_stuff
             cp ~/AIK-Linux/boot.img .
             cp ~/AIK-Linux/dtb.img .
             for rl_modules in $(find /root/kernel -name "*.ko"); do
