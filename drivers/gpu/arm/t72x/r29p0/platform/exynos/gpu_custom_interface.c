@@ -561,7 +561,7 @@ static ssize_t set_gpu_custom_max_clock(struct device *dev, struct device_attrib
 		return -ENOENT;
 	}
 
-	platform->gpu_max_clock = gpu_max_clock;
+/*	platform->gpu_max_clock = gpu_max_clock;  */
 	platform->user_max_lock_input = 0;
 	gpu_dvfs_clock_lock(GPU_DVFS_MAX_UNLOCK, SYSFS_LOCK, 0);
 

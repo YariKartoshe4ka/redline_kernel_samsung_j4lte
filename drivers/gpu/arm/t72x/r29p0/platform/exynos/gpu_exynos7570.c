@@ -85,7 +85,7 @@ static gpu_dvfs_info gpu_dvfs_table_default[] = {
 };
 
 static int mif_min_table[] = {
-	1146, 1001, 830000, 700000, 666000, 415000,
+	1146000, 1001000, 830000, 700000, 666000, 415000,
 };
 
 static gpu_attribute gpu_config_attributes[] = {
@@ -94,12 +94,12 @@ static gpu_attribute gpu_config_attributes[] = {
 	{GPU_MIN_CLOCK, 350},
  	{GPU_MIN_CLOCK_LIMIT, 350},
 	{GPU_DVFS_START_CLOCK, 350},
-	{GPU_DVFS_BL_CONFIG_CLOCK, 830},
-	{GPU_GOVERNOR_TYPE, G3D_DVFS_GOVERNOR_INTERACTIVE},
+	{GPU_DVFS_BL_CONFIG_CLOCK, 1146},
+	{GPU_GOVERNOR_TYPE, G3D_DVFS_GOVERNOR_BOOSTER},
 	{GPU_GOVERNOR_START_CLOCK_DEFAULT, 350},
 	{GPU_GOVERNOR_START_CLOCK_INTERACTIVE, 830},
 	{GPU_GOVERNOR_START_CLOCK_STATIC, 553},
-	{GPU_GOVERNOR_START_CLOCK_BOOSTER, 1001},
+	{GPU_GOVERNOR_START_CLOCK_BOOSTER, 1146},
 	{GPU_GOVERNOR_TABLE_DEFAULT, (uintptr_t)&gpu_dvfs_table_default},
 	{GPU_GOVERNOR_TABLE_INTERACTIVE, (uintptr_t)&gpu_dvfs_table_default},
 	{GPU_GOVERNOR_TABLE_STATIC, (uintptr_t)&gpu_dvfs_table_default},
