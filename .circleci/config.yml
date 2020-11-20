@@ -3,7 +3,7 @@ jobs:
   RedLine-j4ltejx:
    docker:
       - image: ubuntu:18.04
-        user: hendramanu
+        user: ubuntu
    steps:
       - run:
           name: Preparing Environment
