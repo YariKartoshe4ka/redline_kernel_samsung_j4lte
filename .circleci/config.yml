@@ -10,7 +10,7 @@ jobs:
           command: |
             cd ~
             git clone https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME --depth=1 kernel
-            export CROSS_COMPILE=$HOME/toolchain/bin/aarch64-linux-android-
+            export CROSS_COMPILE=/toolchain/bin/aarch64-linux-android-
             cd ~/kernel
             make clean && make mrproper
             make redline_defconfig
