@@ -2,28 +2,14 @@ version: 2.1
 jobs:
   RedLine-j4ltejx:
    docker:
-      - image: ubuntu:18.04
-        user: ubuntu
+      - image: hendramanu/docker-build:latest
    steps:
-      - run:
-          name: Preparing Environment
-          no_output_timeout: 20m
-          command: |
-           export TERM=xterm
-           sudo apt-get update -y && sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime && sudo apt-get install bison build-essential curl flex git gnupg gperf liblz4-tool libncurses5-dev libsdl1.2-dev libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools xsltproc zip zlib1g-dev build-essential kernel-package libncurses5-dev bzip2 git python wget gcc g++ curl -y
-
-      - run:
-          name: Downloading dependencies & source
-          no_output_timeout: 20m
-          command: |
-            cd ~
-            git clone https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME --depth=1 kernel
-            git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b ndk-release-r17 --depth=1 toolchain
-
       - run:
           name: Compiling
           no_output_timeout: 20m
           command: |
+            cd ~
+            git clone https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME --depth=1 kernel
             export CROSS_COMPILE=$HOME/toolchain/bin/aarch64-linux-android-
             cd ~/kernel
             make clean && make mrproper
