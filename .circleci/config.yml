@@ -13,8 +13,8 @@ jobs:
             export CROSS_COMPILE=/toolchain/bin/aarch64-linux-android-
             cd ~/kernel
             make clean && make mrproper
-            make redline_defconfig
-            make -j$(nproc --all)
+            make redline_defconfig O=out
+            make -j$(nproc --all) O=out
 
       - run:
           name: Unpack & Repack
@@ -25,7 +25,7 @@ jobs:
             ./unpackimg.sh
             cd split_img
             rm boot.img-zImage boot.img-dt
-            cp ~/kernel/arch/arm64/boot/Image boot.img-zImage && cp ~/kernel/arch/arm64/boot/dtb.img boot.img-dt && cp boot.img-dt ../dtb.img
+            cp ~/kernel/out/arch/arm64/boot/Image boot.img-zImage && cp ~/kernel/out/arch/arm64/boot/dtb.img boot.img-dt && cp boot.img-dt ../dtb.img
             cd ..
             ./repackimg.sh
             rm boot.img && mv image-new.img boot.img
@@ -37,7 +37,7 @@ jobs:
             mkdir -p RedLine_stuff
             cp ~/AIK-Linux/boot.img .
             cp ~/AIK-Linux/dtb.img .
-            for rl_modules in $(find /root/kernel -name "*.ko"); do
+            for rl_modules in $(find $HOME/kernel/out -name "*.ko"); do
             cp $rl_modules RedLine_stuff/
             done
 
