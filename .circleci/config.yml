@@ -25,7 +25,7 @@ jobs:
             ./unpackimg.sh
             cd split_img
             rm boot.img-zImage boot.img-dt
-            cp ~/kernel/out/arch/arm64/boot/Image boot.img-zImage && cp ~/kernel/out/arch/arm64/boot/dtb.img boot.img-dt && cp boot.img-dt ../dtb.img
+            cp ~/kernel/out/arch/arm64/boot/Image boot.img-zImage && cp ~/kernel/out/arch/arm64/boot/dtb.img boot.img-dt && cp boot.img-dt ../dtb.img && cp boot.img-zImage ../Image
             cd ..
             ./repackimg.sh
             rm boot.img && mv image-new.img boot.img
@@ -37,6 +37,7 @@ jobs:
             mkdir -p RedLine_stuff
             cp ~/AIK-Linux/boot.img .
             cp ~/AIK-Linux/dtb.img .
+            cp ~/AIK-Linux/Image .
             for rl_modules in $(find $HOME/kernel/out -name "*.ko"); do
             cp $rl_modules RedLine_stuff/
             done
