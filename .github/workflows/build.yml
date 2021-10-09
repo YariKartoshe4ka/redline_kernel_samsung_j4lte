@@ -1,0 +1,113 @@
+on:
+  push:
+    branches:
+      - "*"
+    tags:
+      - "*"
+
+  pull_request:
+    branches:
+      - "*"
+
+
+name: Build
+
+jobs:
+  build:
+    name: Build kernel
+    runs-on: ubuntu-latest
+    outputs:
+      ZIP_NAME: ${{ steps.collect-artifacts.outputs.ZIP_NAME }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v2
+
+      - name: Clone cross-compiler
+        run: git clone https://github.com/YariKartoshe4ka/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git aarch64-linux-android-4.9
+      
+      - name: Run build script
+        run: ./build_kernel.sh
+
+      - name: Repack boot image
+        run: |
+          git clone https://github.com/YariKartoshe4ka/AIK-Linux-j4lte.git AIK-Linux
+          cd AIK-Linux
+          ./unpackimg.sh boot.img
+          rm split_img/boot.img-kernel split_img/boot.img-dt
+          cp ../arch/arm64/boot/Image split_img/boot.img-kernel
+          cp ../arch/arm64/boot/dtb.img split_img/boot.img-dt
+          ./repackimg.sh
+          mv image-new.img boot.img
+
+      - name: Collect artifacts
+        id: collect_artifacts
+        run: |
+          mkdir -p artifacts/kernel_modules
+          cp AIK-Linux/boot.img artifacts
+          cp arch/arm64/boot/Image artifacts
+          cp arch/arm64/boot/dtb.img artifacts
+          find . -name "*.ko" -type f -not -path "./artifacts/*" -exec cp {} artifacts/kernel_modules ";" || true
+          export ZIP_NAME=RedLine-$(date +%d_%m_%Y_%H_%M)-j4lte.zip
+          echo "::set-output name=ZIP_NAME::${ZIP_NAME}"
+          cd artifacts && zip -r ${ZIP_NAME} . && mv ${ZIP_NAME} ..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: RedLine Kernel
+          path: ${{ steps.collect_artifacts.outputs.ZIP_NAME }}
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+    needs: build
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: RedLine Kernel
+
+      - name: Get tag name
+        id: tag_name
+        uses: olegtarasov/get-tag@v2.1
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_API_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ steps.tag_name.outputs.tag }}
+          body: |
+            # Draft release (${{ steps.tag_name.outputs.tag }})
+
+            ### Changes
+
+            - Change 1
+            - Change 2
+          draft: true
+          prerelease: false
+
+      - name: Rename artifact
+        run: mv RedLine-*-j4lte.zip RedLine-${{ steps.tag_name.outputs.tag }}-ALL.zip
+
+      - name: Upload asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_API_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: RedLine-${{ steps.tag_name.outputs.tag }}-ALL.zip
+          asset_name: RedLine-${{ steps.tag_name.outputs.tag }}-ALL.zip
+          asset_content_type: application/zip
+
+      - name: Send to Telegram
+        run: |
+          curl "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendDocument" \
+               --form-string "chat_id=${{ secrets.TELEGRAM_TO }}" \
+               --form-string "disable_web_page_preview=true" \
+               --form-string "parse_mode=html" \
+               --form-string "caption=<i> RedLine Kernel ${{ steps.tag_name.outputs.tag }}</i> for <b> 'samsung' 'j4lte' </b> | Build finished on <b> $(TZ='Europe/Moscow' date) </b>" \
+               -F document=@"RedLine-${{ steps.tag_name.outputs.tag }}-ALL.zip"
