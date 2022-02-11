@@ -1,0 +1,2430 @@
+From e76625d0779831ee8d238cca8971bbc768d89ce8 Mon Sep 17 00:00:00 2001
+From: Krzysztof Opasiak <kopasiak90@gmail.com>
+Date: Thu, 19 Jan 2017 18:55:28 +0100
+Subject: [PATCH 1/3] usb: gadget: f_hid: fix: Prevent accessing released
+ memory commit aa65d11aa008f4de58a9cee7e121666d9d68505e upstream.
+
+When we unlock our spinlock to copy data to user we may get
+disabled by USB host and free the whole list of completed out
+requests including the one from which we are copying the data
+to user memory.
+
+To prevent from this let's remove our working element from
+the list and place it back only if there is sth left when we
+finish with it.
+
+Fixes: 99c515005857 ("usb: gadget: hidg: register OUT INT endpoint for SET_REPORT")
+Cc: stable@vger.kernel.org
+Tested-by: David Lechner <david@lechnology.com>
+Signed-off-by: Krzysztof Opasiak <k.opasiak@samsung.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Cc: Jerry Zhang <zhangjerry@google.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/gadget/function/f_hid.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index 2b0a9e41..b6d00728 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -219,13 +219,13 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 	 * call, taking into account its current read position.
+ 	 */
+ 	if (list->pos == req->actual) {
+- 		kfree(list);
++		kfree(list);
+ 
+ 		req->length = hidg->report_length;
+ 		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
+ 		if (ret < 0) {
+ 			free_ep_req(hidg->out_ep, req);
+- 			return ret;
++			return ret;
+ 		}
+ 	} else {
+ 		spin_lock_irqsave(&hidg->spinlock, flags);
+@@ -475,14 +475,13 @@ static void hidg_disable(struct usb_function *f)
+ 
+ 	usb_ep_disable(hidg->out_ep);
+ 	hidg->out_ep->driver_data = NULL;
+-
+-	spin_lock_irqsave(&hidg->read_spinlock, flags);
++	spin_lock_irqsave(&hidg->spinlock, flags);
+ 	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
+ 		free_ep_req(hidg->out_ep, list->req);
+ 		list_del(&list->list);
+ 		kfree(list);
+ 	}
+-	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++	spin_unlock_irqrestore(&hidg->spinlock, flags);
+ }
+ 
+ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+-- 
+2.25.1
+
+
+From 38f56c0d5ced29f1f91fd8ac617a5b0cb7ca21fb Mon Sep 17 00:00:00 2001
+From: Hendra Manudinata <73928476+redline-dev@users.noreply.github.com>
+Date: Sun, 8 Nov 2020 09:09:48 +0700
+Subject: [PATCH 2/3] usb: HID patch
+
+---
+ drivers/usb/gadget/android.c                  |  93 ++-
+ drivers/usb/gadget/function/Makefile          |   2 +
+ drivers/usb/gadget/function/Makefile.orig     |  63 ++
+ drivers/usb/gadget/function/f_hid.c           | 117 ++-
+ drivers/usb/gadget/function/f_hid.c.orig      | 781 ++++++++++++++++++
+ drivers/usb/gadget/function/f_hid.c.rej       |  26 +
+ drivers/usb/gadget/function/f_hid.h           |  16 +
+ .../gadget/function/f_hid_android_keyboard.c  |  39 +
+ .../usb/gadget/function/f_hid_android_mouse.c |  44 +
+ 9 files changed, 1150 insertions(+), 31 deletions(-)
+ create mode 100644 drivers/usb/gadget/function/Makefile.orig
+ create mode 100644 drivers/usb/gadget/function/f_hid.c.orig
+ create mode 100644 drivers/usb/gadget/function/f_hid.c.rej
+ create mode 100644 drivers/usb/gadget/function/f_hid.h
+ create mode 100644 drivers/usb/gadget/function/f_hid_android_keyboard.c
+ create mode 100644 drivers/usb/gadget/function/f_hid_android_mouse.c
+
+diff --git a/drivers/usb/gadget/android.c b/drivers/usb/gadget/android.c
+index 85e95bb9..a767525b 100644
+--- a/drivers/usb/gadget/android.c
++++ b/drivers/usb/gadget/android.c
+@@ -45,6 +45,9 @@
+ #else
+ #include "../function/f_mtp.c"
+ #endif
++#include "../function/f_hid.h"
++#include "../function/f_hid_android_keyboard.c"
++#include "../function/f_hid_android_mouse.c"
+ #include "../function/f_accessory.c"
+ #define USB_ETH_RNDIS y
+ #include "../function/f_rndis.c"
+@@ -1469,6 +1472,40 @@ static struct android_usb_function midi_function = {
+ 	.attributes	= midi_function_attributes,
+ };
+ 
++static int hid_function_init(struct android_usb_function *f, struct usb_composite_dev *cdev)
++{
++	return ghid_setup(cdev->gadget, 2);
++}
++
++static void hid_function_cleanup(struct android_usb_function *f)
++{
++	ghid_cleanup();
++}
++
++static int hid_function_bind_config(struct android_usb_function *f, struct usb_configuration *c)
++{
++	int ret;
++	printk(KERN_INFO "hid keyboard\n");
++	ret = hidg_bind_config(c, &ghid_device_android_keyboard, 0);
++	if (ret) {
++		pr_info("%s: hid_function_bind_config keyboard failed: %d\n", __func__, ret);
++		return ret;
++	}
++	printk(KERN_INFO "hid mouse\n");
++	ret = hidg_bind_config(c, &ghid_device_android_mouse, 1);
++	if (ret) {
++		pr_info("%s: hid_function_bind_config mouse failed: %d\n", __func__, ret);
++		return ret;
++	}
++	return 0;
++}
++
++static struct android_usb_function hid_function = {
++	.name		= "hid",
++	.init		= hid_function_init,
++	.cleanup	= hid_function_cleanup,
++	.bind_config	= hid_function_bind_config,
++};
+ 
+ static struct android_usb_function *supported_functions[] = {
+ 	&ffs_function,
+@@ -1488,6 +1525,7 @@ static struct android_usb_function *supported_functions[] = {
+ 	&conn_gadget_function,
+ #endif
+ 	&midi_function,
++	&hid_function,
+ 	NULL
+ };
+ 
+@@ -1667,8 +1705,8 @@ functions_store(struct device *pdev, struct device_attribute *attr,
+ 	char buf[256], *b;
+ 	char aliases[256], *a;
+ 	int err;
+-	int is_ffs;
+ 	int ffs_enabled = 0;
++	int hid_enabled = 0;
+ 
+ #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
+ 	g_rndis = 0;
+@@ -1695,52 +1733,63 @@ functions_store(struct device *pdev, struct device_attribute *attr,
+ 		if (!name)
+ 			continue;
+ 
+-		is_ffs = 0;
++		
+ 		strlcpy(aliases, dev->ffs_aliases, sizeof(aliases));
+ 		a = aliases;
+ 
+ 		while (a) {
+ 			char *alias = strsep(&a, ",");
+ 			if (alias && !strcmp(name, alias)) {
+-				is_ffs = 1;
++				name = "ffs";
+ 				break;
+ 			}
+ 		}
+ 
+-		if (is_ffs) {
+-			if (ffs_enabled)
+-				continue;
+-			err = android_enable_function(dev, "ffs");
+-			if (err)
+-				pr_err("android_usb: Cannot enable ffs (%d)",
+-									err);
+-			else
+-				ffs_enabled = 1;
++	if (ffs_enabled && !strcmp(name, "ffs"))
+ 			continue;
+-		}
++	if (hid_enabled && !strcmp(name, "hid"))
++			continue;
++		
+ 
+ 		err = android_enable_function(dev, name);
+-		if (err)
++		if (err) {
+ 			pr_err("android_usb: Cannot enable '%s' (%d)",
+-							   name, err);
+-#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
++							   		name, err);
++				continue;
++
++			}
++		if (!strcmp(name, "ffs"))
++			ffs_enabled = 1;
+ 
++		if (!strcmp(name, "hid"))
++				hid_enabled = 1;
++#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
+ 			/* Enable ACM function, if MTP is enabled. */
+ 			if (!strcmp(name, "mtp")) {
+-				err = android_enable_function(dev, "acm");
++				name = "acm";
++				err = android_enable_function(dev, name);
+ 				if (err)
+-					pr_err(
+-					"android_usb: Cannot enable '%s'",
+-					name);
++					pr_err("android_usb: Cannot enable '%s' (%d)",
++						name, err);
+ 			}
+ 
+-			if (!strcmp(name, "rndis")) {
++			if (!strcmp(name, "rndis")) 
+ 				g_rndis = 1;
+-			}
++			
+ 
+ #endif
+ 	}
+ 
++/* Always enable HID gadget function. */
++	if (!hid_enabled) {
++		name = "hid";
++		err = android_enable_function(dev, name);
++		if (err)
++			pr_err("android_usb: Cannot enable '%s' (%d)",
++						name, err);
++	}
++
++
+ 	mutex_unlock(&dev->mutex);
+ 
+ 	return size;
+diff --git a/drivers/usb/gadget/function/Makefile b/drivers/usb/gadget/function/Makefile
+index 8dd406f7..e9eb14a6 100644
+--- a/drivers/usb/gadget/function/Makefile
++++ b/drivers/usb/gadget/function/Makefile
+@@ -55,6 +55,8 @@ usb_f_audio_source-y            := f_audio_source.o
+ obj-$(CONFIG_USB_F_AUDIO_SRC)   += usb_f_audio_source.o
+ usb_f_accessory-y               := f_accessory.o
+ obj-$(CONFIG_USB_F_ACC)         += usb_f_accessory.o
++usb_f_hid-y                     := f_hid.o
++obj-$(CONFIG_USB_G_ANDROID)     += usb_f_hid.o
+ 
+ 
+ 
+diff --git a/drivers/usb/gadget/function/Makefile.orig b/drivers/usb/gadget/function/Makefile.orig
+new file mode 100644
+index 00000000..8dd406f7
+--- /dev/null
++++ b/drivers/usb/gadget/function/Makefile.orig
+@@ -0,0 +1,63 @@
++#
++# USB peripheral controller drivers
++#
++
++ccflags-y			:= -I$(srctree)/drivers/usb/gadget/
++ccflags-y			+= -I$(srctree)/drivers/usb/gadget/udc/
++
++# USB Functions
++usb_f_acm-y			:= f_acm.o
++obj-$(CONFIG_USB_F_ACM)		+= usb_f_acm.o
++usb_f_ss_lb-y			:= f_loopback.o f_sourcesink.o
++obj-$(CONFIG_USB_F_SS_LB)	+= usb_f_ss_lb.o
++obj-$(CONFIG_USB_U_SERIAL)	+= u_serial.o
++usb_f_serial-y			:= f_serial.o
++obj-$(CONFIG_USB_F_SERIAL)	+= usb_f_serial.o
++usb_f_obex-y			:= f_obex.o
++obj-$(CONFIG_USB_F_OBEX)	+= usb_f_obex.o
++obj-$(CONFIG_USB_U_ETHER)	+= u_ether.o
++usb_f_ncm-y			:= f_ncm.o
++obj-$(CONFIG_USB_F_NCM)		+= usb_f_ncm.o
++usb_f_ecm-y			:= f_ecm.o
++obj-$(CONFIG_USB_F_ECM)		+= usb_f_ecm.o
++usb_f_phonet-y			:= f_phonet.o
++obj-$(CONFIG_USB_F_PHONET)	+= usb_f_phonet.o
++usb_f_eem-y			:= f_eem.o
++obj-$(CONFIG_USB_F_EEM)		+= usb_f_eem.o
++usb_f_ecm_subset-y		:= f_subset.o
++obj-$(CONFIG_USB_F_SUBSET)	+= usb_f_ecm_subset.o
++usb_f_rndis-y			:= f_rndis.o rndis.o
++obj-$(CONFIG_USB_F_RNDIS)	+= usb_f_rndis.o
++usb_f_mass_storage-y		:= f_mass_storage.o storage_common.o
++obj-$(CONFIG_USB_F_MASS_STORAGE)+= usb_f_mass_storage.o
++usb_f_fs-y			:= f_fs.o
++obj-$(CONFIG_USB_F_FS)		+= usb_f_fs.o
++usb_f_uac1-y			:= f_uac1.o u_uac1.o
++obj-$(CONFIG_USB_F_UAC1)	+= usb_f_uac1.o
++usb_f_uac2-y			:= f_uac2.o
++obj-$(CONFIG_USB_F_UAC2)	+= usb_f_uac2.o
++usb_f_uvc-y			:= f_uvc.o uvc_queue.o uvc_v4l2.o uvc_video.o
++obj-$(CONFIG_USB_F_UVC)		+= usb_f_uvc.o
++usb_f_dm-y			:= f_dm.o
++obj-$(CONFIG_USB_CONFIGFS_F_DM)	+= usb_f_dm.o
++usb_f_adb-y			:= f_adb.o
++obj-$(CONFIG_USB_CONFIGFS_F_ADB)+= usb_f_adb.o
++ifeq ($(CONFIG_USB_ANDROID_SAMSUNG_MTP),y)
++	usb_f_mtp_samsung-y     := f_mtp_samsung.o
++	obj-$(CONFIG_USB_F_MTP) += usb_f_mtp_samsung.o
++else
++	usb_f_mtp-y             := f_mtp.o
++	obj-$(CONFIG_USB_F_MTP) += usb_f_mtp.o
++endif
++usb_f_ptp-y                     := f_ptp.o
++obj-$(CONFIG_USB_F_PTP)         += usb_f_ptp.o
++usb_f_audio_source-y            := f_audio_source.o
++obj-$(CONFIG_USB_F_AUDIO_SRC)   += usb_f_audio_source.o
++usb_f_accessory-y               := f_accessory.o
++obj-$(CONFIG_USB_F_ACC)         += usb_f_accessory.o
++
++
++
++usb_f_midi-y			:= f_midi.o
++obj-$(CONFIG_USB_F_MIDI)	+= usb_f_midi.o
++obj-$(CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE)	+= multi_config.o
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index b6d00728..9635bb19 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -17,8 +17,10 @@
+ #include <linux/poll.h>
+ #include <linux/uaccess.h>
+ #include <linux/wait.h>
++#include <linux/delay.h>
+ #include <linux/sched.h>
+ #include <linux/usb/g_hid.h>
++#include "f_hid.h"
+ 
+ #include "u_f.h"
+ 
+@@ -62,6 +64,43 @@ struct f_hidg {
+ 	struct usb_ep			*out_ep;
+ };
+ 
++/* Hacky device list to fix f_hidg_write being called after device destroyed.
++   It covers only most common race conditions, there will be rare crashes anyway. */
++enum { HACKY_DEVICE_LIST_SIZE = 4 };
++static struct f_hidg *hacky_device_list[HACKY_DEVICE_LIST_SIZE];
++static void hacky_device_list_add(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (!hacky_device_list[i]) {
++			hacky_device_list[i] = hidg;
++			return;
++		}
++	}
++	pr_err("%s: too many devices, not adding device %p\n", __func__, hidg);
++}
++static void hacky_device_list_remove(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (hacky_device_list[i] == hidg) {
++			hacky_device_list[i] = NULL;
++			return;
++		}
++	}
++	pr_err("%s: cannot find device %p\n", __func__, hidg);
++}
++static int hacky_device_list_check(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (hacky_device_list[i] == hidg) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
+ static inline struct f_hidg *func_to_hidg(struct usb_function *f)
+ {
+ 	return container_of(f, struct f_hidg, func);
+@@ -162,7 +201,8 @@ static struct usb_descriptor_header *hidg_fs_descriptors[] = {
+ 
+ /*-------------------------------------------------------------------------*/
+ /*                              Char Device                                */
+-
++// fix for implicit declaration of function 'free_ep_req'
++void free_ep_req(struct usb_ep *ep, struct usb_request *req);
+ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 			size_t count, loff_t *ptr)
+ {
+@@ -177,6 +217,11 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 
+ 	if (!access_ok(VERIFY_WRITE, buffer, count))
+ 		return -EFAULT;
++if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to read from device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
+ 
+ 	spin_lock_irqsave(&hidg->spinlock, flags);
+ 
+@@ -219,13 +264,13 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 	 * call, taking into account its current read position.
+ 	 */
+ 	if (list->pos == req->actual) {
+-		kfree(list);
++ 		kfree(list);
+ 
+ 		req->length = hidg->report_length;
+ 		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
+ 		if (ret < 0) {
+ 			free_ep_req(hidg->out_ep, req);
+-			return ret;
++ 			return ret;
+ 		}
+ 	} else {
+ 		spin_lock_irqsave(&hidg->spinlock, flags);
+@@ -260,6 +305,12 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 	if (!access_ok(VERIFY_READ, buffer, count))
+ 		return -EFAULT;
+ 
++if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to write to device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
++
+ 	mutex_lock(&hidg->lock);
+ 
+ #define WRITE_COND (!hidg->write_pending)
+@@ -274,6 +325,11 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 				hidg->write_queue, WRITE_COND))
+ 			return -ERESTARTSYS;
+ 
++		if (hacky_device_list_check(hidg)) {
++			pr_err("%s: trying to write to device %p that was destroyed\n", __func__, hidg);
++			return -EIO;
++		}
++
+ 		mutex_lock(&hidg->lock);
+ 	}
+ 
+@@ -314,7 +370,22 @@ static unsigned int f_hidg_poll(struct file *file, poll_table *wait)
+ 	struct f_hidg	*hidg  = file->private_data;
+ 	unsigned int	ret = 0;
+ 
++if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to poll device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
++
++
+ 	poll_wait(file, &hidg->read_queue, wait);
++
++	if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to poll device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
++
++
+ 	poll_wait(file, &hidg->write_queue, wait);
+ 
+ 	if (WRITE_COND)
+@@ -404,7 +475,13 @@ static int hidg_setup(struct usb_function *f,
+ 	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+ 		  | HID_REQ_GET_PROTOCOL):
+ 		VDBG(cdev, "get_protocol\n");
+-		goto stall;
++		length = min_t(unsigned, length, 1);
++	if (hidg->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT)
++		((u8 *) req->buf)[0] = 0;	/* Boot protocol */
++	else
++		((u8 *) req->buf)[0] = 1;	/* Report protocol */
++	goto respond;
++
+ 		break;
+ 
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+@@ -416,6 +493,14 @@ static int hidg_setup(struct usb_function *f,
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+ 		  | HID_REQ_SET_PROTOCOL):
+ 		VDBG(cdev, "set_protocol\n");
++length = 0;
++	if (hidg->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT) {
++		if (value == 0)		/* Boot protocol */
++			goto respond;
++	} else {
++		if (value == 1)		/* Report protocol */
++			goto respond;
++	}
+ 		goto stall;
+ 		break;
+ 
+@@ -475,6 +560,7 @@ static void hidg_disable(struct usb_function *f)
+ 
+ 	usb_ep_disable(hidg->out_ep);
+ 	hidg->out_ep->driver_data = NULL;
++
+ 	spin_lock_irqsave(&hidg->spinlock, flags);
+ 	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
+ 		free_ep_req(hidg->out_ep, list->req);
+@@ -568,12 +654,14 @@ const struct file_operations f_hidg_fops = {
+ 	.llseek		= noop_llseek,
+ };
+ 
+-static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
++static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct usb_ep		*ep;
+ 	struct f_hidg		*hidg = func_to_hidg(f);
+ 	int			status;
+ 	dev_t			dev;
++	pr_info("%s: creating device %p\n", __func__, hidg);
++
+ 
+ 	/* allocate instance-specific interface IDs, and patch descriptors */
+ 	status = usb_interface_id(c, f);
+@@ -640,7 +728,7 @@ static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 		goto fail_free_descs;
+ 
+ 	device_create(hidg_class, NULL, dev, NULL, "%s%d", "hidg", hidg->minor);
+-
++	hacky_device_list_add(hidg);
+ 	return 0;
+ 
+ fail_free_descs:
+@@ -660,12 +748,22 @@ static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct f_hidg *hidg = func_to_hidg(f);
+ 
++pr_info("%s: destroying device %p\n", __func__, hidg);
++	/* This does not cover all race conditions, only most common one */
++	mutex_lock(&hidg->lock);
++	hacky_device_list_remove(hidg);
++	mutex_unlock(&hidg->lock);
++
+ 	device_destroy(hidg_class, MKDEV(major, hidg->minor));
+ 	cdev_del(&hidg->cdev);
+ 
+ 	/* disable/free request and end point */
+ 	usb_ep_disable(hidg->in_ep);
+-	usb_ep_dequeue(hidg->in_ep, hidg->req);
++	/* TODO: calling this function crash kernel,
++	   not calling this funct ion crash kernel inside f_hidg_write */
++	/* usb_ep_dequeue(hidg->in_ep, hidg->req); */
++
++
+ 	kfree(hidg->req->buf);
+ 	usb_ep_free_request(hidg->in_ep, hidg->req);
+ 
+@@ -698,7 +796,7 @@ static struct usb_gadget_strings *ct_func_strings[] = {
+ /*-------------------------------------------------------------------------*/
+ /*                             usb_configuration                           */
+ 
+-int __init hidg_bind_config(struct usb_configuration *c,
++int hidg_bind_config(struct usb_configuration *c,
+ 			    struct hidg_func_descriptor *fdesc, int index)
+ {
+ 	struct f_hidg *hidg;
+@@ -752,7 +850,7 @@ int __init hidg_bind_config(struct usb_configuration *c,
+ 	return status;
+ }
+ 
+-int __init ghid_setup(struct usb_gadget *g, int count)
++int ghid_setup(struct usb_gadget *g, int count)
+ {
+ 	int status;
+ 	dev_t dev;
+@@ -778,3 +876,4 @@ void ghid_cleanup(void)
+ 	class_destroy(hidg_class);
+ 	hidg_class = NULL;
+ }
++
+diff --git a/drivers/usb/gadget/function/f_hid.c.orig b/drivers/usb/gadget/function/f_hid.c.orig
+new file mode 100644
+index 00000000..2b0a9e41
+--- /dev/null
++++ b/drivers/usb/gadget/function/f_hid.c.orig
+@@ -0,0 +1,781 @@
++/*
++ * f_hid.c -- USB HID function driver
++ *
++ * Copyright (C) 2010 Fabien Chouteau <fabien.chouteau@barco.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/hid.h>
++#include <linux/cdev.h>
++#include <linux/mutex.h>
++#include <linux/poll.h>
++#include <linux/uaccess.h>
++#include <linux/wait.h>
++#include <linux/sched.h>
++#include <linux/usb/g_hid.h>
++
++#include "u_f.h"
++
++static int major, minors;
++static struct class *hidg_class;
++
++/*-------------------------------------------------------------------------*/
++/*                            HID gadget struct                            */
++
++struct f_hidg_req_list {
++	struct usb_request	*req;
++	unsigned int		pos;
++	struct list_head 	list;
++};
++
++struct f_hidg {
++	/* configuration */
++	unsigned char			bInterfaceSubClass;
++	unsigned char			bInterfaceProtocol;
++	unsigned short			report_desc_length;
++	char				*report_desc;
++	unsigned short			report_length;
++
++	/* recv report */
++	struct list_head		completed_out_req;
++	spinlock_t			spinlock;
++	wait_queue_head_t		read_queue;
++	unsigned int			qlen;
++
++	/* send report */
++	struct mutex			lock;
++	bool				write_pending;
++	wait_queue_head_t		write_queue;
++	struct usb_request		*req;
++
++	int				minor;
++	struct cdev			cdev;
++	struct usb_function		func;
++
++	struct usb_ep			*in_ep;
++	struct usb_ep			*out_ep;
++};
++
++static inline struct f_hidg *func_to_hidg(struct usb_function *f)
++{
++	return container_of(f, struct f_hidg, func);
++}
++
++/*-------------------------------------------------------------------------*/
++/*                           Static descriptors                            */
++
++static struct usb_interface_descriptor hidg_interface_desc = {
++	.bLength		= sizeof hidg_interface_desc,
++	.bDescriptorType	= USB_DT_INTERFACE,
++	/* .bInterfaceNumber	= DYNAMIC */
++	.bAlternateSetting	= 0,
++	.bNumEndpoints		= 2,
++	.bInterfaceClass	= USB_CLASS_HID,
++	/* .bInterfaceSubClass	= DYNAMIC */
++	/* .bInterfaceProtocol	= DYNAMIC */
++	/* .iInterface		= DYNAMIC */
++};
++
++static struct hid_descriptor hidg_desc = {
++	.bLength			= sizeof hidg_desc,
++	.bDescriptorType		= HID_DT_HID,
++	.bcdHID				= 0x0101,
++	.bCountryCode			= 0x00,
++	.bNumDescriptors		= 0x1,
++	/*.desc[0].bDescriptorType	= DYNAMIC */
++	/*.desc[0].wDescriptorLenght	= DYNAMIC */
++};
++
++/* High-Speed Support */
++
++static struct usb_endpoint_descriptor hidg_hs_in_ep_desc = {
++	.bLength		= USB_DT_ENDPOINT_SIZE,
++	.bDescriptorType	= USB_DT_ENDPOINT,
++	.bEndpointAddress	= USB_DIR_IN,
++	.bmAttributes		= USB_ENDPOINT_XFER_INT,
++	/*.wMaxPacketSize	= DYNAMIC */
++	.bInterval		= 4, /* FIXME: Add this field in the
++				      * HID gadget configuration?
++				      * (struct hidg_func_descriptor)
++				      */
++};
++
++static struct usb_endpoint_descriptor hidg_hs_out_ep_desc = {
++	.bLength		= USB_DT_ENDPOINT_SIZE,
++	.bDescriptorType	= USB_DT_ENDPOINT,
++	.bEndpointAddress	= USB_DIR_OUT,
++	.bmAttributes		= USB_ENDPOINT_XFER_INT,
++	/*.wMaxPacketSize	= DYNAMIC */
++	.bInterval		= 4, /* FIXME: Add this field in the
++				      * HID gadget configuration?
++				      * (struct hidg_func_descriptor)
++				      */
++};
++
++static struct usb_descriptor_header *hidg_hs_descriptors[] = {
++	(struct usb_descriptor_header *)&hidg_interface_desc,
++	(struct usb_descriptor_header *)&hidg_desc,
++	(struct usb_descriptor_header *)&hidg_hs_in_ep_desc,
++	(struct usb_descriptor_header *)&hidg_hs_out_ep_desc,
++	NULL,
++};
++
++/* Full-Speed Support */
++
++static struct usb_endpoint_descriptor hidg_fs_in_ep_desc = {
++	.bLength		= USB_DT_ENDPOINT_SIZE,
++	.bDescriptorType	= USB_DT_ENDPOINT,
++	.bEndpointAddress	= USB_DIR_IN,
++	.bmAttributes		= USB_ENDPOINT_XFER_INT,
++	/*.wMaxPacketSize	= DYNAMIC */
++	.bInterval		= 10, /* FIXME: Add this field in the
++				       * HID gadget configuration?
++				       * (struct hidg_func_descriptor)
++				       */
++};
++
++static struct usb_endpoint_descriptor hidg_fs_out_ep_desc = {
++	.bLength		= USB_DT_ENDPOINT_SIZE,
++	.bDescriptorType	= USB_DT_ENDPOINT,
++	.bEndpointAddress	= USB_DIR_OUT,
++	.bmAttributes		= USB_ENDPOINT_XFER_INT,
++	/*.wMaxPacketSize	= DYNAMIC */
++	.bInterval		= 10, /* FIXME: Add this field in the
++				       * HID gadget configuration?
++				       * (struct hidg_func_descriptor)
++				       */
++};
++
++static struct usb_descriptor_header *hidg_fs_descriptors[] = {
++	(struct usb_descriptor_header *)&hidg_interface_desc,
++	(struct usb_descriptor_header *)&hidg_desc,
++	(struct usb_descriptor_header *)&hidg_fs_in_ep_desc,
++	(struct usb_descriptor_header *)&hidg_fs_out_ep_desc,
++	NULL,
++};
++
++/*-------------------------------------------------------------------------*/
++/*                              Char Device                                */
++
++static ssize_t f_hidg_read(struct file *file, char __user *buffer,
++			size_t count, loff_t *ptr)
++{
++	struct f_hidg *hidg = file->private_data;
++	struct f_hidg_req_list *list;
++	struct usb_request *req;
++	unsigned long flags;
++	int ret;
++
++	if (!count)
++		return 0;
++
++	if (!access_ok(VERIFY_WRITE, buffer, count))
++		return -EFAULT;
++
++	spin_lock_irqsave(&hidg->spinlock, flags);
++
++#define READ_COND (!list_empty(&hidg->completed_out_req))
++
++	/* wait for at least one buffer to complete */
++	while (!READ_COND) {
++		spin_unlock_irqrestore(&hidg->spinlock, flags);
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++
++		if (wait_event_interruptible(hidg->read_queue, READ_COND))
++			return -ERESTARTSYS;
++
++		spin_lock_irqsave(&hidg->spinlock, flags);
++	}
++
++	/* pick the first one */
++	list = list_first_entry(&hidg->completed_out_req,
++				struct f_hidg_req_list, list);
++
++	/*
++	 * Remove this from list to protect it from beign free()
++	 * while host disables our function
++	 */
++	list_del(&list->list);
++
++	req = list->req;
++	count = min_t(unsigned int, count, req->actual - list->pos);
++	spin_unlock_irqrestore(&hidg->spinlock, flags);
++
++	/* copy to user outside spinlock */
++	count -= copy_to_user(buffer, req->buf + list->pos, count);
++	list->pos += count;
++
++	/*
++	 * if this request is completely handled and transfered to
++	 * userspace, remove its entry from the list and requeue it
++	 * again. Otherwise, we will revisit it again upon the next
++	 * call, taking into account its current read position.
++	 */
++	if (list->pos == req->actual) {
++ 		kfree(list);
++
++		req->length = hidg->report_length;
++		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
++		if (ret < 0) {
++			free_ep_req(hidg->out_ep, req);
++ 			return ret;
++		}
++	} else {
++		spin_lock_irqsave(&hidg->spinlock, flags);
++		list_add(&list->list, &hidg->completed_out_req);
++		spin_unlock_irqrestore(&hidg->spinlock, flags);
++
++		wake_up(&hidg->read_queue);
++	}
++
++	return count;
++}
++
++static void f_hidg_req_complete(struct usb_ep *ep, struct usb_request *req)
++{
++	struct f_hidg *hidg = (struct f_hidg *)ep->driver_data;
++
++	if (req->status != 0) {
++		ERROR(hidg->func.config->cdev,
++			"End Point Request ERROR: %d\n", req->status);
++	}
++
++	hidg->write_pending = 0;
++	wake_up(&hidg->write_queue);
++}
++
++static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
++			    size_t count, loff_t *offp)
++{
++	struct f_hidg *hidg  = file->private_data;
++	ssize_t status = -ENOMEM;
++
++	if (!access_ok(VERIFY_READ, buffer, count))
++		return -EFAULT;
++
++	mutex_lock(&hidg->lock);
++
++#define WRITE_COND (!hidg->write_pending)
++
++	/* write queue */
++	while (!WRITE_COND) {
++		mutex_unlock(&hidg->lock);
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++
++		if (wait_event_interruptible_exclusive(
++				hidg->write_queue, WRITE_COND))
++			return -ERESTARTSYS;
++
++		mutex_lock(&hidg->lock);
++	}
++
++	count  = min_t(unsigned, count, hidg->report_length);
++	status = copy_from_user(hidg->req->buf, buffer, count);
++
++	if (status != 0) {
++		ERROR(hidg->func.config->cdev,
++			"copy_from_user error\n");
++		mutex_unlock(&hidg->lock);
++		return -EINVAL;
++	}
++
++	hidg->req->status   = 0;
++	hidg->req->zero     = 0;
++	hidg->req->length   = count;
++	hidg->req->complete = f_hidg_req_complete;
++	hidg->req->context  = hidg;
++	hidg->write_pending = 1;
++
++	status = usb_ep_queue(hidg->in_ep, hidg->req, GFP_ATOMIC);
++	if (status < 0) {
++		ERROR(hidg->func.config->cdev,
++			"usb_ep_queue error on int endpoint %zd\n", status);
++		hidg->write_pending = 0;
++		wake_up(&hidg->write_queue);
++	} else {
++		status = count;
++	}
++
++	mutex_unlock(&hidg->lock);
++
++	return status;
++}
++
++static unsigned int f_hidg_poll(struct file *file, poll_table *wait)
++{
++	struct f_hidg	*hidg  = file->private_data;
++	unsigned int	ret = 0;
++
++	poll_wait(file, &hidg->read_queue, wait);
++	poll_wait(file, &hidg->write_queue, wait);
++
++	if (WRITE_COND)
++		ret |= POLLOUT | POLLWRNORM;
++
++	if (READ_COND)
++		ret |= POLLIN | POLLRDNORM;
++
++	return ret;
++}
++
++#undef WRITE_COND
++#undef READ_COND
++
++static int f_hidg_release(struct inode *inode, struct file *fd)
++{
++	fd->private_data = NULL;
++	return 0;
++}
++
++static int f_hidg_open(struct inode *inode, struct file *fd)
++{
++	struct f_hidg *hidg =
++		container_of(inode->i_cdev, struct f_hidg, cdev);
++
++	fd->private_data = hidg;
++
++	return 0;
++}
++
++/*-------------------------------------------------------------------------*/
++/*                                usb_function                             */
++
++static inline struct usb_request *hidg_alloc_ep_req(struct usb_ep *ep,
++						    unsigned length)
++{
++	return alloc_ep_req(ep, length, length);
++}
++
++static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
++{
++	struct f_hidg *hidg = (struct f_hidg *) req->context;
++	struct f_hidg_req_list *req_list;
++	unsigned long flags;
++
++	req_list = kzalloc(sizeof(*req_list), GFP_ATOMIC);
++	if (!req_list)
++		return;
++
++	req_list->req = req;
++
++	spin_lock_irqsave(&hidg->spinlock, flags);
++	list_add_tail(&req_list->list, &hidg->completed_out_req);
++	spin_unlock_irqrestore(&hidg->spinlock, flags);
++
++	wake_up(&hidg->read_queue);
++}
++
++static int hidg_setup(struct usb_function *f,
++		const struct usb_ctrlrequest *ctrl)
++{
++	struct f_hidg			*hidg = func_to_hidg(f);
++	struct usb_composite_dev	*cdev = f->config->cdev;
++	struct usb_request		*req  = cdev->req;
++	int status = 0;
++	__u16 value, length;
++
++	value	= __le16_to_cpu(ctrl->wValue);
++	length	= __le16_to_cpu(ctrl->wLength);
++
++	VDBG(cdev,
++	     "%s crtl_request : bRequestType:0x%x bRequest:0x%x Value:0x%x\n",
++	     __func__, ctrl->bRequestType, ctrl->bRequest, value);
++
++	switch ((ctrl->bRequestType << 8) | ctrl->bRequest) {
++	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_GET_REPORT):
++		VDBG(cdev, "get_report\n");
++
++		/* send an empty report */
++		length = min_t(unsigned, length, hidg->report_length);
++		memset(req->buf, 0x0, length);
++
++		goto respond;
++		break;
++
++	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_GET_PROTOCOL):
++		VDBG(cdev, "get_protocol\n");
++		goto stall;
++		break;
++
++	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_SET_REPORT):
++		VDBG(cdev, "set_report | wLenght=%d\n", ctrl->wLength);
++		goto stall;
++		break;
++
++	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_SET_PROTOCOL):
++		VDBG(cdev, "set_protocol\n");
++		goto stall;
++		break;
++
++	case ((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8
++		  | USB_REQ_GET_DESCRIPTOR):
++		switch (value >> 8) {
++		case HID_DT_HID:
++			VDBG(cdev, "USB_REQ_GET_DESCRIPTOR: HID\n");
++			length = min_t(unsigned short, length,
++						   hidg_desc.bLength);
++			memcpy(req->buf, &hidg_desc, length);
++			goto respond;
++			break;
++		case HID_DT_REPORT:
++			VDBG(cdev, "USB_REQ_GET_DESCRIPTOR: REPORT\n");
++			length = min_t(unsigned short, length,
++						   hidg->report_desc_length);
++			memcpy(req->buf, hidg->report_desc, length);
++			goto respond;
++			break;
++
++		default:
++			VDBG(cdev, "Unknown descriptor request 0x%x\n",
++				 value >> 8);
++			goto stall;
++			break;
++		}
++		break;
++
++	default:
++		VDBG(cdev, "Unknown request 0x%x\n",
++			 ctrl->bRequest);
++		goto stall;
++		break;
++	}
++
++stall:
++	return -EOPNOTSUPP;
++
++respond:
++	req->zero = 0;
++	req->length = length;
++	status = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
++	if (status < 0)
++		ERROR(cdev, "usb_ep_queue error on ep0 %d\n", value);
++	return status;
++}
++
++static void hidg_disable(struct usb_function *f)
++{
++	struct f_hidg *hidg = func_to_hidg(f);
++	struct f_hidg_req_list *list, *next;
++	unsigned long flags;
++
++	usb_ep_disable(hidg->in_ep);
++	hidg->in_ep->driver_data = NULL;
++
++	usb_ep_disable(hidg->out_ep);
++	hidg->out_ep->driver_data = NULL;
++
++	spin_lock_irqsave(&hidg->read_spinlock, flags);
++	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
++		free_ep_req(hidg->out_ep, list->req);
++		list_del(&list->list);
++		kfree(list);
++	}
++	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++}
++
++static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
++{
++	struct usb_composite_dev		*cdev = f->config->cdev;
++	struct f_hidg				*hidg = func_to_hidg(f);
++	int i, status = 0;
++
++	VDBG(cdev, "hidg_set_alt intf:%d alt:%d\n", intf, alt);
++
++	if (hidg->in_ep != NULL) {
++		/* restart endpoint */
++		if (hidg->in_ep->driver_data != NULL)
++			usb_ep_disable(hidg->in_ep);
++
++		status = config_ep_by_speed(f->config->cdev->gadget, f,
++					    hidg->in_ep);
++		if (status) {
++			ERROR(cdev, "config_ep_by_speed FAILED!\n");
++			goto fail;
++		}
++		status = usb_ep_enable(hidg->in_ep);
++		if (status < 0) {
++			ERROR(cdev, "Enable IN endpoint FAILED!\n");
++			goto fail;
++		}
++		hidg->in_ep->driver_data = hidg;
++	}
++
++
++	if (hidg->out_ep != NULL) {
++		/* restart endpoint */
++		if (hidg->out_ep->driver_data != NULL)
++			usb_ep_disable(hidg->out_ep);
++
++		status = config_ep_by_speed(f->config->cdev->gadget, f,
++					    hidg->out_ep);
++		if (status) {
++			ERROR(cdev, "config_ep_by_speed FAILED!\n");
++			goto fail;
++		}
++		status = usb_ep_enable(hidg->out_ep);
++		if (status < 0) {
++			ERROR(cdev, "Enable IN endpoint FAILED!\n");
++			goto fail;
++		}
++		hidg->out_ep->driver_data = hidg;
++
++		/*
++		 * allocate a bunch of read buffers and queue them all at once.
++		 */
++		for (i = 0; i < hidg->qlen && status == 0; i++) {
++			struct usb_request *req =
++					hidg_alloc_ep_req(hidg->out_ep,
++							  hidg->report_length);
++			if (req) {
++				req->complete = hidg_set_report_complete;
++				req->context  = hidg;
++				status = usb_ep_queue(hidg->out_ep, req,
++						      GFP_ATOMIC);
++				if (status)
++					ERROR(cdev, "%s queue req --> %d\n",
++						hidg->out_ep->name, status);
++			} else {
++				usb_ep_disable(hidg->out_ep);
++				hidg->out_ep->driver_data = NULL;
++				status = -ENOMEM;
++				goto fail;
++			}
++		}
++	}
++
++fail:
++	return status;
++}
++
++const struct file_operations f_hidg_fops = {
++	.owner		= THIS_MODULE,
++	.open		= f_hidg_open,
++	.release	= f_hidg_release,
++	.write		= f_hidg_write,
++	.read		= f_hidg_read,
++	.poll		= f_hidg_poll,
++	.llseek		= noop_llseek,
++};
++
++static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
++{
++	struct usb_ep		*ep;
++	struct f_hidg		*hidg = func_to_hidg(f);
++	int			status;
++	dev_t			dev;
++
++	/* allocate instance-specific interface IDs, and patch descriptors */
++	status = usb_interface_id(c, f);
++	if (status < 0)
++		goto fail;
++	hidg_interface_desc.bInterfaceNumber = status;
++
++	/* allocate instance-specific endpoints */
++	status = -ENODEV;
++	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_in_ep_desc);
++	if (!ep)
++		goto fail;
++	ep->driver_data = c->cdev;	/* claim */
++	hidg->in_ep = ep;
++
++	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_out_ep_desc);
++	if (!ep)
++		goto fail;
++	ep->driver_data = c->cdev;	/* claim */
++	hidg->out_ep = ep;
++
++	/* preallocate request and buffer */
++	status = -ENOMEM;
++	hidg->req = usb_ep_alloc_request(hidg->in_ep, GFP_KERNEL);
++	if (!hidg->req)
++		goto fail;
++
++	hidg->req->buf = kmalloc(hidg->report_length, GFP_KERNEL);
++	if (!hidg->req->buf)
++		goto fail;
++
++	/* set descriptor dynamic values */
++	hidg_interface_desc.bInterfaceSubClass = hidg->bInterfaceSubClass;
++	hidg_interface_desc.bInterfaceProtocol = hidg->bInterfaceProtocol;
++	hidg_hs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
++	hidg_fs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
++	hidg_hs_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
++	hidg_fs_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
++	hidg_desc.desc[0].bDescriptorType = HID_DT_REPORT;
++	hidg_desc.desc[0].wDescriptorLength =
++		cpu_to_le16(hidg->report_desc_length);
++
++	hidg_hs_in_ep_desc.bEndpointAddress =
++		hidg_fs_in_ep_desc.bEndpointAddress;
++	hidg_hs_out_ep_desc.bEndpointAddress =
++		hidg_fs_out_ep_desc.bEndpointAddress;
++
++	status = usb_assign_descriptors(f, hidg_fs_descriptors,
++			hidg_hs_descriptors, NULL);
++	if (status)
++		goto fail;
++
++	mutex_init(&hidg->lock);
++	spin_lock_init(&hidg->spinlock);
++	init_waitqueue_head(&hidg->write_queue);
++	init_waitqueue_head(&hidg->read_queue);
++	INIT_LIST_HEAD(&hidg->completed_out_req);
++
++	/* create char device */
++	cdev_init(&hidg->cdev, &f_hidg_fops);
++	dev = MKDEV(major, hidg->minor);
++	status = cdev_add(&hidg->cdev, dev, 1);
++	if (status)
++		goto fail_free_descs;
++
++	device_create(hidg_class, NULL, dev, NULL, "%s%d", "hidg", hidg->minor);
++
++	return 0;
++
++fail_free_descs:
++	usb_free_all_descriptors(f);
++fail:
++	ERROR(f->config->cdev, "hidg_bind FAILED\n");
++	if (hidg->req != NULL) {
++		kfree(hidg->req->buf);
++		if (hidg->in_ep != NULL)
++			usb_ep_free_request(hidg->in_ep, hidg->req);
++	}
++
++	return status;
++}
++
++static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
++{
++	struct f_hidg *hidg = func_to_hidg(f);
++
++	device_destroy(hidg_class, MKDEV(major, hidg->minor));
++	cdev_del(&hidg->cdev);
++
++	/* disable/free request and end point */
++	usb_ep_disable(hidg->in_ep);
++	usb_ep_dequeue(hidg->in_ep, hidg->req);
++	kfree(hidg->req->buf);
++	usb_ep_free_request(hidg->in_ep, hidg->req);
++
++	usb_free_all_descriptors(f);
++
++	kfree(hidg->report_desc);
++	kfree(hidg);
++}
++
++/*-------------------------------------------------------------------------*/
++/*                                 Strings                                 */
++
++#define CT_FUNC_HID_IDX	0
++
++static struct usb_string ct_func_string_defs[] = {
++	[CT_FUNC_HID_IDX].s	= "HID Interface",
++	{},			/* end of list */
++};
++
++static struct usb_gadget_strings ct_func_string_table = {
++	.language	= 0x0409,	/* en-US */
++	.strings	= ct_func_string_defs,
++};
++
++static struct usb_gadget_strings *ct_func_strings[] = {
++	&ct_func_string_table,
++	NULL,
++};
++
++/*-------------------------------------------------------------------------*/
++/*                             usb_configuration                           */
++
++int __init hidg_bind_config(struct usb_configuration *c,
++			    struct hidg_func_descriptor *fdesc, int index)
++{
++	struct f_hidg *hidg;
++	int status;
++
++	if (index >= minors)
++		return -ENOENT;
++
++	/* maybe allocate device-global string IDs, and patch descriptors */
++	if (ct_func_string_defs[CT_FUNC_HID_IDX].id == 0) {
++		status = usb_string_id(c->cdev);
++		if (status < 0)
++			return status;
++		ct_func_string_defs[CT_FUNC_HID_IDX].id = status;
++		hidg_interface_desc.iInterface = status;
++	}
++
++	/* allocate and initialize one new instance */
++	hidg = kzalloc(sizeof *hidg, GFP_KERNEL);
++	if (!hidg)
++		return -ENOMEM;
++
++	hidg->minor = index;
++	hidg->bInterfaceSubClass = fdesc->subclass;
++	hidg->bInterfaceProtocol = fdesc->protocol;
++	hidg->report_length = fdesc->report_length;
++	hidg->report_desc_length = fdesc->report_desc_length;
++	hidg->report_desc = kmemdup(fdesc->report_desc,
++				    fdesc->report_desc_length,
++				    GFP_KERNEL);
++	if (!hidg->report_desc) {
++		kfree(hidg);
++		return -ENOMEM;
++	}
++
++	hidg->func.name    = "hid";
++	hidg->func.strings = ct_func_strings;
++	hidg->func.bind    = hidg_bind;
++	hidg->func.unbind  = hidg_unbind;
++	hidg->func.set_alt = hidg_set_alt;
++	hidg->func.disable = hidg_disable;
++	hidg->func.setup   = hidg_setup;
++
++	/* this could me made configurable at some point */
++	hidg->qlen	   = 4;
++
++	status = usb_add_function(c, &hidg->func);
++	if (status)
++		kfree(hidg);
++
++	return status;
++}
++
++int __init ghid_setup(struct usb_gadget *g, int count)
++{
++	int status;
++	dev_t dev;
++
++	hidg_class = class_create(THIS_MODULE, "hidg");
++
++	status = alloc_chrdev_region(&dev, 0, count, "hidg");
++	if (!status) {
++		major = MAJOR(dev);
++		minors = count;
++	}
++
++	return status;
++}
++
++void ghid_cleanup(void)
++{
++	if (major) {
++		unregister_chrdev_region(MKDEV(major, 0), minors);
++		major = minors = 0;
++	}
++
++	class_destroy(hidg_class);
++	hidg_class = NULL;
++}
+diff --git a/drivers/usb/gadget/function/f_hid.c.rej b/drivers/usb/gadget/function/f_hid.c.rej
+new file mode 100644
+index 00000000..e881fbd9
+--- /dev/null
++++ b/drivers/usb/gadget/function/f_hid.c.rej
+@@ -0,0 +1,26 @@
++--- drivers/usb/gadget/function/f_hid.c
+++++ drivers/usb/gadget/function/f_hid.c
++@@ -264,13 +309,13 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
++ 	 * call, taking into account its current read position.
++ 	 */
++ 	if (list->pos == req->actual) {
++-		kfree(list);
+++ 		kfree(list);
++ 
++ 		req->length = hidg->report_length;
++ 		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
++ 		if (ret < 0) {
++ 			free_ep_req(hidg->out_ep, req);
++-			return ret;
+++ 			return ret;
++ 		}
++ 	} else {
++ 		spin_lock_irqsave(&hidg->spinlock, flags);
++@@ -560,6 +645,7 @@ static void hidg_disable(struct usb_function *f)
++ 
++ 	usb_ep_disable(hidg->out_ep);
++ 	hidg->out_ep->driver_data = NULL;
+++
++ 	spin_lock_irqsave(&hidg->spinlock, flags);
++ 	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
++ 		free_ep_req(hidg->out_ep, list->req);
+diff --git a/drivers/usb/gadget/function/f_hid.h b/drivers/usb/gadget/function/f_hid.h
+new file mode 100644
+index 00000000..ad3527a6
+--- /dev/null
++++ b/drivers/usb/gadget/function/f_hid.h
+@@ -0,0 +1,16 @@
++#ifndef _GADGET_F_HID_H
++#define _GADGET_F_HID_H
++
++#include <linux/hid.h>
++#include <linux/usb/composite.h>
++#include <linux/usb/gadget.h>
++#include <linux/usb/g_hid.h>
++
++int hidg_bind_config(struct usb_configuration *c,
++			    struct hidg_func_descriptor *fdesc, int index);
++
++int ghid_setup(struct usb_gadget *g, int count);
++
++void ghid_cleanup(void);
++
++#endif
+diff --git a/drivers/usb/gadget/function/f_hid_android_keyboard.c b/drivers/usb/gadget/function/f_hid_android_keyboard.c
+new file mode 100644
+index 00000000..c0432b38
+--- /dev/null
++++ b/drivers/usb/gadget/function/f_hid_android_keyboard.c
+@@ -0,0 +1,39 @@
++#include <linux/platform_device.h>
++#include <linux/usb/g_hid.h>
++
++/* HID descriptor for a mouse */
++static struct hidg_func_descriptor ghid_device_android_mouse = {
++	.subclass      = 1, /* Boot Interface Subclass */
++	.protocol      = 2, /* Mouse */
++	.report_length = 4,
++	.report_desc_length	= 52,
++	.report_desc = {
++		0x05, 0x01,  //Usage Page(Generic Desktop Controls)
++		0x09, 0x02,  //Usage (Mouse)
++		0xa1, 0x01,  //Collection (Application)
++		0x09, 0x01,  //Usage (pointer)
++		0xa1, 0x00,  //Collection (Physical)
++		0x05, 0x09,  //Usage Page (Button)
++		0x19, 0x01,  //Usage Minimum(1)
++		0x29, 0x05,  //Usage Maximum(5)
++		0x15, 0x00,  //Logical Minimum(1)
++		0x25, 0x01,  //Logical Maximum(1)
++		0x95, 0x05,  //Report Count(5)
++		0x75, 0x01,  //Report Size(1)
++		0x81, 0x02,  //Input(Data,Variable,Absolute,BitField)
++		0x95, 0x01,  //Report Count(1)
++		0x75, 0x03,  //Report Size(3)
++		0x81, 0x01,  //Input(Constant,Array,Absolute,BitField)
++		0x05, 0x01,  //Usage Page(Generic Desktop Controls)
++		0x09, 0x30,  //Usage(x)
++		0x09, 0x31,  //Usage(y)
++		0x09, 0x38,  //Usage(Wheel)
++		0x15, 0x81,  //Logical Minimum(-127)
++		0x25, 0x7F,  //Logical Maximum(127)
++		0x75, 0x08,  //Report Size(8)
++		0x95, 0x03,  //Report Count(3)
++		0x81, 0x06,  //Input(Data,Variable,Relative,BitField)
++		0xc0,  //End Collection
++		0xc0  //End Collection
++	}
++};
+diff --git a/drivers/usb/gadget/function/f_hid_android_mouse.c b/drivers/usb/gadget/function/f_hid_android_mouse.c
+new file mode 100644
+index 00000000..1824bdde
+--- /dev/null
++++ b/drivers/usb/gadget/function/f_hid_android_mouse.c
+@@ -0,0 +1,44 @@
++#include <linux/platform_device.h>
++#include <linux/usb/g_hid.h>
++
++/* hid descriptor for a keyboard */
++static struct hidg_func_descriptor ghid_device_android_keyboard = {
++	.subclass		= 1, /* Boot Interface Subclass */
++	.protocol		= 1, /* Keyboard */
++	.report_length		= 8,
++	.report_desc_length	= 63,
++	.report_desc		= {
++		0x05, 0x01,	/* USAGE_PAGE (Generic Desktop)	          */
++		0x09, 0x06,	/* USAGE (Keyboard)                       */
++		0xa1, 0x01,	/* COLLECTION (Application)               */
++		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
++		0x19, 0xe0,	/*   USAGE_MINIMUM (Keyboard LeftControl) */
++		0x29, 0xe7,	/*   USAGE_MAXIMUM (Keyboard Right GUI)   */
++		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
++		0x25, 0x01,	/*   LOGICAL_MAXIMUM (1)                  */
++		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
++		0x95, 0x08,	/*   REPORT_COUNT (8)                     */
++		0x81, 0x02,	/*   INPUT (Data,Var,Abs)                 */
++		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
++		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
++		0x81, 0x03,	/*   INPUT (Cnst,Var,Abs)                 */
++		0x95, 0x05,	/*   REPORT_COUNT (5)                     */
++		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
++		0x05, 0x08,	/*   USAGE_PAGE (LEDs)                    */
++		0x19, 0x01,	/*   USAGE_MINIMUM (Num Lock)             */
++		0x29, 0x05,	/*   USAGE_MAXIMUM (Kana)                 */
++		0x91, 0x02,	/*   OUTPUT (Data,Var,Abs)                */
++		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
++		0x75, 0x03,	/*   REPORT_SIZE (3)                      */
++		0x91, 0x03,	/*   OUTPUT (Cnst,Var,Abs)                */
++		0x95, 0x06,	/*   REPORT_COUNT (6)                     */
++		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
++		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
++		0x25, 0x65,	/*   LOGICAL_MAXIMUM (101)                */
++		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
++		0x19, 0x00,	/*   USAGE_MINIMUM (Reserved)             */
++		0x29, 0x65,	/*   USAGE_MAXIMUM (Keyboard Application) */
++		0x81, 0x00,	/*   INPUT (Data,Ary,Abs)                 */
++		0xc0		/* END_COLLECTION                         */
++	}
++};
+-- 
+2.25.1
+
+
+From 253cb85822620a61a647649c9ce5462261afd348 Mon Sep 17 00:00:00 2001
+From: Hendra Manudinata <73928476+redline-dev@users.noreply.github.com>
+Date: Sun, 8 Nov 2020 09:10:42 +0700
+Subject: [PATCH 3/3] Delete lefted blobs
+
+---
+ drivers/usb/gadget/function/Makefile.orig |  63 --
+ drivers/usb/gadget/function/f_hid.c.orig  | 781 ----------------------
+ drivers/usb/gadget/function/f_hid.c.rej   |  26 -
+ 3 files changed, 870 deletions(-)
+ delete mode 100644 drivers/usb/gadget/function/Makefile.orig
+ delete mode 100644 drivers/usb/gadget/function/f_hid.c.orig
+ delete mode 100644 drivers/usb/gadget/function/f_hid.c.rej
+
+diff --git a/drivers/usb/gadget/function/Makefile.orig b/drivers/usb/gadget/function/Makefile.orig
+deleted file mode 100644
+index 8dd406f7..00000000
+--- a/drivers/usb/gadget/function/Makefile.orig
++++ /dev/null
+@@ -1,63 +0,0 @@
+-#
+-# USB peripheral controller drivers
+-#
+-
+-ccflags-y			:= -I$(srctree)/drivers/usb/gadget/
+-ccflags-y			+= -I$(srctree)/drivers/usb/gadget/udc/
+-
+-# USB Functions
+-usb_f_acm-y			:= f_acm.o
+-obj-$(CONFIG_USB_F_ACM)		+= usb_f_acm.o
+-usb_f_ss_lb-y			:= f_loopback.o f_sourcesink.o
+-obj-$(CONFIG_USB_F_SS_LB)	+= usb_f_ss_lb.o
+-obj-$(CONFIG_USB_U_SERIAL)	+= u_serial.o
+-usb_f_serial-y			:= f_serial.o
+-obj-$(CONFIG_USB_F_SERIAL)	+= usb_f_serial.o
+-usb_f_obex-y			:= f_obex.o
+-obj-$(CONFIG_USB_F_OBEX)	+= usb_f_obex.o
+-obj-$(CONFIG_USB_U_ETHER)	+= u_ether.o
+-usb_f_ncm-y			:= f_ncm.o
+-obj-$(CONFIG_USB_F_NCM)		+= usb_f_ncm.o
+-usb_f_ecm-y			:= f_ecm.o
+-obj-$(CONFIG_USB_F_ECM)		+= usb_f_ecm.o
+-usb_f_phonet-y			:= f_phonet.o
+-obj-$(CONFIG_USB_F_PHONET)	+= usb_f_phonet.o
+-usb_f_eem-y			:= f_eem.o
+-obj-$(CONFIG_USB_F_EEM)		+= usb_f_eem.o
+-usb_f_ecm_subset-y		:= f_subset.o
+-obj-$(CONFIG_USB_F_SUBSET)	+= usb_f_ecm_subset.o
+-usb_f_rndis-y			:= f_rndis.o rndis.o
+-obj-$(CONFIG_USB_F_RNDIS)	+= usb_f_rndis.o
+-usb_f_mass_storage-y		:= f_mass_storage.o storage_common.o
+-obj-$(CONFIG_USB_F_MASS_STORAGE)+= usb_f_mass_storage.o
+-usb_f_fs-y			:= f_fs.o
+-obj-$(CONFIG_USB_F_FS)		+= usb_f_fs.o
+-usb_f_uac1-y			:= f_uac1.o u_uac1.o
+-obj-$(CONFIG_USB_F_UAC1)	+= usb_f_uac1.o
+-usb_f_uac2-y			:= f_uac2.o
+-obj-$(CONFIG_USB_F_UAC2)	+= usb_f_uac2.o
+-usb_f_uvc-y			:= f_uvc.o uvc_queue.o uvc_v4l2.o uvc_video.o
+-obj-$(CONFIG_USB_F_UVC)		+= usb_f_uvc.o
+-usb_f_dm-y			:= f_dm.o
+-obj-$(CONFIG_USB_CONFIGFS_F_DM)	+= usb_f_dm.o
+-usb_f_adb-y			:= f_adb.o
+-obj-$(CONFIG_USB_CONFIGFS_F_ADB)+= usb_f_adb.o
+-ifeq ($(CONFIG_USB_ANDROID_SAMSUNG_MTP),y)
+-	usb_f_mtp_samsung-y     := f_mtp_samsung.o
+-	obj-$(CONFIG_USB_F_MTP) += usb_f_mtp_samsung.o
+-else
+-	usb_f_mtp-y             := f_mtp.o
+-	obj-$(CONFIG_USB_F_MTP) += usb_f_mtp.o
+-endif
+-usb_f_ptp-y                     := f_ptp.o
+-obj-$(CONFIG_USB_F_PTP)         += usb_f_ptp.o
+-usb_f_audio_source-y            := f_audio_source.o
+-obj-$(CONFIG_USB_F_AUDIO_SRC)   += usb_f_audio_source.o
+-usb_f_accessory-y               := f_accessory.o
+-obj-$(CONFIG_USB_F_ACC)         += usb_f_accessory.o
+-
+-
+-
+-usb_f_midi-y			:= f_midi.o
+-obj-$(CONFIG_USB_F_MIDI)	+= usb_f_midi.o
+-obj-$(CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE)	+= multi_config.o
+diff --git a/drivers/usb/gadget/function/f_hid.c.orig b/drivers/usb/gadget/function/f_hid.c.orig
+deleted file mode 100644
+index 2b0a9e41..00000000
+--- a/drivers/usb/gadget/function/f_hid.c.orig
++++ /dev/null
+@@ -1,781 +0,0 @@
+-/*
+- * f_hid.c -- USB HID function driver
+- *
+- * Copyright (C) 2010 Fabien Chouteau <fabien.chouteau@barco.com>
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- */
+-
+-#include <linux/kernel.h>
+-#include <linux/module.h>
+-#include <linux/hid.h>
+-#include <linux/cdev.h>
+-#include <linux/mutex.h>
+-#include <linux/poll.h>
+-#include <linux/uaccess.h>
+-#include <linux/wait.h>
+-#include <linux/sched.h>
+-#include <linux/usb/g_hid.h>
+-
+-#include "u_f.h"
+-
+-static int major, minors;
+-static struct class *hidg_class;
+-
+-/*-------------------------------------------------------------------------*/
+-/*                            HID gadget struct                            */
+-
+-struct f_hidg_req_list {
+-	struct usb_request	*req;
+-	unsigned int		pos;
+-	struct list_head 	list;
+-};
+-
+-struct f_hidg {
+-	/* configuration */
+-	unsigned char			bInterfaceSubClass;
+-	unsigned char			bInterfaceProtocol;
+-	unsigned short			report_desc_length;
+-	char				*report_desc;
+-	unsigned short			report_length;
+-
+-	/* recv report */
+-	struct list_head		completed_out_req;
+-	spinlock_t			spinlock;
+-	wait_queue_head_t		read_queue;
+-	unsigned int			qlen;
+-
+-	/* send report */
+-	struct mutex			lock;
+-	bool				write_pending;
+-	wait_queue_head_t		write_queue;
+-	struct usb_request		*req;
+-
+-	int				minor;
+-	struct cdev			cdev;
+-	struct usb_function		func;
+-
+-	struct usb_ep			*in_ep;
+-	struct usb_ep			*out_ep;
+-};
+-
+-static inline struct f_hidg *func_to_hidg(struct usb_function *f)
+-{
+-	return container_of(f, struct f_hidg, func);
+-}
+-
+-/*-------------------------------------------------------------------------*/
+-/*                           Static descriptors                            */
+-
+-static struct usb_interface_descriptor hidg_interface_desc = {
+-	.bLength		= sizeof hidg_interface_desc,
+-	.bDescriptorType	= USB_DT_INTERFACE,
+-	/* .bInterfaceNumber	= DYNAMIC */
+-	.bAlternateSetting	= 0,
+-	.bNumEndpoints		= 2,
+-	.bInterfaceClass	= USB_CLASS_HID,
+-	/* .bInterfaceSubClass	= DYNAMIC */
+-	/* .bInterfaceProtocol	= DYNAMIC */
+-	/* .iInterface		= DYNAMIC */
+-};
+-
+-static struct hid_descriptor hidg_desc = {
+-	.bLength			= sizeof hidg_desc,
+-	.bDescriptorType		= HID_DT_HID,
+-	.bcdHID				= 0x0101,
+-	.bCountryCode			= 0x00,
+-	.bNumDescriptors		= 0x1,
+-	/*.desc[0].bDescriptorType	= DYNAMIC */
+-	/*.desc[0].wDescriptorLenght	= DYNAMIC */
+-};
+-
+-/* High-Speed Support */
+-
+-static struct usb_endpoint_descriptor hidg_hs_in_ep_desc = {
+-	.bLength		= USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType	= USB_DT_ENDPOINT,
+-	.bEndpointAddress	= USB_DIR_IN,
+-	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+-	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
+-};
+-
+-static struct usb_endpoint_descriptor hidg_hs_out_ep_desc = {
+-	.bLength		= USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType	= USB_DT_ENDPOINT,
+-	.bEndpointAddress	= USB_DIR_OUT,
+-	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+-	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
+-};
+-
+-static struct usb_descriptor_header *hidg_hs_descriptors[] = {
+-	(struct usb_descriptor_header *)&hidg_interface_desc,
+-	(struct usb_descriptor_header *)&hidg_desc,
+-	(struct usb_descriptor_header *)&hidg_hs_in_ep_desc,
+-	(struct usb_descriptor_header *)&hidg_hs_out_ep_desc,
+-	NULL,
+-};
+-
+-/* Full-Speed Support */
+-
+-static struct usb_endpoint_descriptor hidg_fs_in_ep_desc = {
+-	.bLength		= USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType	= USB_DT_ENDPOINT,
+-	.bEndpointAddress	= USB_DIR_IN,
+-	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+-	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 10, /* FIXME: Add this field in the
+-				       * HID gadget configuration?
+-				       * (struct hidg_func_descriptor)
+-				       */
+-};
+-
+-static struct usb_endpoint_descriptor hidg_fs_out_ep_desc = {
+-	.bLength		= USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType	= USB_DT_ENDPOINT,
+-	.bEndpointAddress	= USB_DIR_OUT,
+-	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+-	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 10, /* FIXME: Add this field in the
+-				       * HID gadget configuration?
+-				       * (struct hidg_func_descriptor)
+-				       */
+-};
+-
+-static struct usb_descriptor_header *hidg_fs_descriptors[] = {
+-	(struct usb_descriptor_header *)&hidg_interface_desc,
+-	(struct usb_descriptor_header *)&hidg_desc,
+-	(struct usb_descriptor_header *)&hidg_fs_in_ep_desc,
+-	(struct usb_descriptor_header *)&hidg_fs_out_ep_desc,
+-	NULL,
+-};
+-
+-/*-------------------------------------------------------------------------*/
+-/*                              Char Device                                */
+-
+-static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+-			size_t count, loff_t *ptr)
+-{
+-	struct f_hidg *hidg = file->private_data;
+-	struct f_hidg_req_list *list;
+-	struct usb_request *req;
+-	unsigned long flags;
+-	int ret;
+-
+-	if (!count)
+-		return 0;
+-
+-	if (!access_ok(VERIFY_WRITE, buffer, count))
+-		return -EFAULT;
+-
+-	spin_lock_irqsave(&hidg->spinlock, flags);
+-
+-#define READ_COND (!list_empty(&hidg->completed_out_req))
+-
+-	/* wait for at least one buffer to complete */
+-	while (!READ_COND) {
+-		spin_unlock_irqrestore(&hidg->spinlock, flags);
+-		if (file->f_flags & O_NONBLOCK)
+-			return -EAGAIN;
+-
+-		if (wait_event_interruptible(hidg->read_queue, READ_COND))
+-			return -ERESTARTSYS;
+-
+-		spin_lock_irqsave(&hidg->spinlock, flags);
+-	}
+-
+-	/* pick the first one */
+-	list = list_first_entry(&hidg->completed_out_req,
+-				struct f_hidg_req_list, list);
+-
+-	/*
+-	 * Remove this from list to protect it from beign free()
+-	 * while host disables our function
+-	 */
+-	list_del(&list->list);
+-
+-	req = list->req;
+-	count = min_t(unsigned int, count, req->actual - list->pos);
+-	spin_unlock_irqrestore(&hidg->spinlock, flags);
+-
+-	/* copy to user outside spinlock */
+-	count -= copy_to_user(buffer, req->buf + list->pos, count);
+-	list->pos += count;
+-
+-	/*
+-	 * if this request is completely handled and transfered to
+-	 * userspace, remove its entry from the list and requeue it
+-	 * again. Otherwise, we will revisit it again upon the next
+-	 * call, taking into account its current read position.
+-	 */
+-	if (list->pos == req->actual) {
+- 		kfree(list);
+-
+-		req->length = hidg->report_length;
+-		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
+-		if (ret < 0) {
+-			free_ep_req(hidg->out_ep, req);
+- 			return ret;
+-		}
+-	} else {
+-		spin_lock_irqsave(&hidg->spinlock, flags);
+-		list_add(&list->list, &hidg->completed_out_req);
+-		spin_unlock_irqrestore(&hidg->spinlock, flags);
+-
+-		wake_up(&hidg->read_queue);
+-	}
+-
+-	return count;
+-}
+-
+-static void f_hidg_req_complete(struct usb_ep *ep, struct usb_request *req)
+-{
+-	struct f_hidg *hidg = (struct f_hidg *)ep->driver_data;
+-
+-	if (req->status != 0) {
+-		ERROR(hidg->func.config->cdev,
+-			"End Point Request ERROR: %d\n", req->status);
+-	}
+-
+-	hidg->write_pending = 0;
+-	wake_up(&hidg->write_queue);
+-}
+-
+-static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+-			    size_t count, loff_t *offp)
+-{
+-	struct f_hidg *hidg  = file->private_data;
+-	ssize_t status = -ENOMEM;
+-
+-	if (!access_ok(VERIFY_READ, buffer, count))
+-		return -EFAULT;
+-
+-	mutex_lock(&hidg->lock);
+-
+-#define WRITE_COND (!hidg->write_pending)
+-
+-	/* write queue */
+-	while (!WRITE_COND) {
+-		mutex_unlock(&hidg->lock);
+-		if (file->f_flags & O_NONBLOCK)
+-			return -EAGAIN;
+-
+-		if (wait_event_interruptible_exclusive(
+-				hidg->write_queue, WRITE_COND))
+-			return -ERESTARTSYS;
+-
+-		mutex_lock(&hidg->lock);
+-	}
+-
+-	count  = min_t(unsigned, count, hidg->report_length);
+-	status = copy_from_user(hidg->req->buf, buffer, count);
+-
+-	if (status != 0) {
+-		ERROR(hidg->func.config->cdev,
+-			"copy_from_user error\n");
+-		mutex_unlock(&hidg->lock);
+-		return -EINVAL;
+-	}
+-
+-	hidg->req->status   = 0;
+-	hidg->req->zero     = 0;
+-	hidg->req->length   = count;
+-	hidg->req->complete = f_hidg_req_complete;
+-	hidg->req->context  = hidg;
+-	hidg->write_pending = 1;
+-
+-	status = usb_ep_queue(hidg->in_ep, hidg->req, GFP_ATOMIC);
+-	if (status < 0) {
+-		ERROR(hidg->func.config->cdev,
+-			"usb_ep_queue error on int endpoint %zd\n", status);
+-		hidg->write_pending = 0;
+-		wake_up(&hidg->write_queue);
+-	} else {
+-		status = count;
+-	}
+-
+-	mutex_unlock(&hidg->lock);
+-
+-	return status;
+-}
+-
+-static unsigned int f_hidg_poll(struct file *file, poll_table *wait)
+-{
+-	struct f_hidg	*hidg  = file->private_data;
+-	unsigned int	ret = 0;
+-
+-	poll_wait(file, &hidg->read_queue, wait);
+-	poll_wait(file, &hidg->write_queue, wait);
+-
+-	if (WRITE_COND)
+-		ret |= POLLOUT | POLLWRNORM;
+-
+-	if (READ_COND)
+-		ret |= POLLIN | POLLRDNORM;
+-
+-	return ret;
+-}
+-
+-#undef WRITE_COND
+-#undef READ_COND
+-
+-static int f_hidg_release(struct inode *inode, struct file *fd)
+-{
+-	fd->private_data = NULL;
+-	return 0;
+-}
+-
+-static int f_hidg_open(struct inode *inode, struct file *fd)
+-{
+-	struct f_hidg *hidg =
+-		container_of(inode->i_cdev, struct f_hidg, cdev);
+-
+-	fd->private_data = hidg;
+-
+-	return 0;
+-}
+-
+-/*-------------------------------------------------------------------------*/
+-/*                                usb_function                             */
+-
+-static inline struct usb_request *hidg_alloc_ep_req(struct usb_ep *ep,
+-						    unsigned length)
+-{
+-	return alloc_ep_req(ep, length, length);
+-}
+-
+-static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
+-{
+-	struct f_hidg *hidg = (struct f_hidg *) req->context;
+-	struct f_hidg_req_list *req_list;
+-	unsigned long flags;
+-
+-	req_list = kzalloc(sizeof(*req_list), GFP_ATOMIC);
+-	if (!req_list)
+-		return;
+-
+-	req_list->req = req;
+-
+-	spin_lock_irqsave(&hidg->spinlock, flags);
+-	list_add_tail(&req_list->list, &hidg->completed_out_req);
+-	spin_unlock_irqrestore(&hidg->spinlock, flags);
+-
+-	wake_up(&hidg->read_queue);
+-}
+-
+-static int hidg_setup(struct usb_function *f,
+-		const struct usb_ctrlrequest *ctrl)
+-{
+-	struct f_hidg			*hidg = func_to_hidg(f);
+-	struct usb_composite_dev	*cdev = f->config->cdev;
+-	struct usb_request		*req  = cdev->req;
+-	int status = 0;
+-	__u16 value, length;
+-
+-	value	= __le16_to_cpu(ctrl->wValue);
+-	length	= __le16_to_cpu(ctrl->wLength);
+-
+-	VDBG(cdev,
+-	     "%s crtl_request : bRequestType:0x%x bRequest:0x%x Value:0x%x\n",
+-	     __func__, ctrl->bRequestType, ctrl->bRequest, value);
+-
+-	switch ((ctrl->bRequestType << 8) | ctrl->bRequest) {
+-	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+-		  | HID_REQ_GET_REPORT):
+-		VDBG(cdev, "get_report\n");
+-
+-		/* send an empty report */
+-		length = min_t(unsigned, length, hidg->report_length);
+-		memset(req->buf, 0x0, length);
+-
+-		goto respond;
+-		break;
+-
+-	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+-		  | HID_REQ_GET_PROTOCOL):
+-		VDBG(cdev, "get_protocol\n");
+-		goto stall;
+-		break;
+-
+-	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+-		  | HID_REQ_SET_REPORT):
+-		VDBG(cdev, "set_report | wLenght=%d\n", ctrl->wLength);
+-		goto stall;
+-		break;
+-
+-	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+-		  | HID_REQ_SET_PROTOCOL):
+-		VDBG(cdev, "set_protocol\n");
+-		goto stall;
+-		break;
+-
+-	case ((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8
+-		  | USB_REQ_GET_DESCRIPTOR):
+-		switch (value >> 8) {
+-		case HID_DT_HID:
+-			VDBG(cdev, "USB_REQ_GET_DESCRIPTOR: HID\n");
+-			length = min_t(unsigned short, length,
+-						   hidg_desc.bLength);
+-			memcpy(req->buf, &hidg_desc, length);
+-			goto respond;
+-			break;
+-		case HID_DT_REPORT:
+-			VDBG(cdev, "USB_REQ_GET_DESCRIPTOR: REPORT\n");
+-			length = min_t(unsigned short, length,
+-						   hidg->report_desc_length);
+-			memcpy(req->buf, hidg->report_desc, length);
+-			goto respond;
+-			break;
+-
+-		default:
+-			VDBG(cdev, "Unknown descriptor request 0x%x\n",
+-				 value >> 8);
+-			goto stall;
+-			break;
+-		}
+-		break;
+-
+-	default:
+-		VDBG(cdev, "Unknown request 0x%x\n",
+-			 ctrl->bRequest);
+-		goto stall;
+-		break;
+-	}
+-
+-stall:
+-	return -EOPNOTSUPP;
+-
+-respond:
+-	req->zero = 0;
+-	req->length = length;
+-	status = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+-	if (status < 0)
+-		ERROR(cdev, "usb_ep_queue error on ep0 %d\n", value);
+-	return status;
+-}
+-
+-static void hidg_disable(struct usb_function *f)
+-{
+-	struct f_hidg *hidg = func_to_hidg(f);
+-	struct f_hidg_req_list *list, *next;
+-	unsigned long flags;
+-
+-	usb_ep_disable(hidg->in_ep);
+-	hidg->in_ep->driver_data = NULL;
+-
+-	usb_ep_disable(hidg->out_ep);
+-	hidg->out_ep->driver_data = NULL;
+-
+-	spin_lock_irqsave(&hidg->read_spinlock, flags);
+-	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
+-		free_ep_req(hidg->out_ep, list->req);
+-		list_del(&list->list);
+-		kfree(list);
+-	}
+-	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
+-}
+-
+-static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+-{
+-	struct usb_composite_dev		*cdev = f->config->cdev;
+-	struct f_hidg				*hidg = func_to_hidg(f);
+-	int i, status = 0;
+-
+-	VDBG(cdev, "hidg_set_alt intf:%d alt:%d\n", intf, alt);
+-
+-	if (hidg->in_ep != NULL) {
+-		/* restart endpoint */
+-		if (hidg->in_ep->driver_data != NULL)
+-			usb_ep_disable(hidg->in_ep);
+-
+-		status = config_ep_by_speed(f->config->cdev->gadget, f,
+-					    hidg->in_ep);
+-		if (status) {
+-			ERROR(cdev, "config_ep_by_speed FAILED!\n");
+-			goto fail;
+-		}
+-		status = usb_ep_enable(hidg->in_ep);
+-		if (status < 0) {
+-			ERROR(cdev, "Enable IN endpoint FAILED!\n");
+-			goto fail;
+-		}
+-		hidg->in_ep->driver_data = hidg;
+-	}
+-
+-
+-	if (hidg->out_ep != NULL) {
+-		/* restart endpoint */
+-		if (hidg->out_ep->driver_data != NULL)
+-			usb_ep_disable(hidg->out_ep);
+-
+-		status = config_ep_by_speed(f->config->cdev->gadget, f,
+-					    hidg->out_ep);
+-		if (status) {
+-			ERROR(cdev, "config_ep_by_speed FAILED!\n");
+-			goto fail;
+-		}
+-		status = usb_ep_enable(hidg->out_ep);
+-		if (status < 0) {
+-			ERROR(cdev, "Enable IN endpoint FAILED!\n");
+-			goto fail;
+-		}
+-		hidg->out_ep->driver_data = hidg;
+-
+-		/*
+-		 * allocate a bunch of read buffers and queue them all at once.
+-		 */
+-		for (i = 0; i < hidg->qlen && status == 0; i++) {
+-			struct usb_request *req =
+-					hidg_alloc_ep_req(hidg->out_ep,
+-							  hidg->report_length);
+-			if (req) {
+-				req->complete = hidg_set_report_complete;
+-				req->context  = hidg;
+-				status = usb_ep_queue(hidg->out_ep, req,
+-						      GFP_ATOMIC);
+-				if (status)
+-					ERROR(cdev, "%s queue req --> %d\n",
+-						hidg->out_ep->name, status);
+-			} else {
+-				usb_ep_disable(hidg->out_ep);
+-				hidg->out_ep->driver_data = NULL;
+-				status = -ENOMEM;
+-				goto fail;
+-			}
+-		}
+-	}
+-
+-fail:
+-	return status;
+-}
+-
+-const struct file_operations f_hidg_fops = {
+-	.owner		= THIS_MODULE,
+-	.open		= f_hidg_open,
+-	.release	= f_hidg_release,
+-	.write		= f_hidg_write,
+-	.read		= f_hidg_read,
+-	.poll		= f_hidg_poll,
+-	.llseek		= noop_llseek,
+-};
+-
+-static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
+-{
+-	struct usb_ep		*ep;
+-	struct f_hidg		*hidg = func_to_hidg(f);
+-	int			status;
+-	dev_t			dev;
+-
+-	/* allocate instance-specific interface IDs, and patch descriptors */
+-	status = usb_interface_id(c, f);
+-	if (status < 0)
+-		goto fail;
+-	hidg_interface_desc.bInterfaceNumber = status;
+-
+-	/* allocate instance-specific endpoints */
+-	status = -ENODEV;
+-	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_in_ep_desc);
+-	if (!ep)
+-		goto fail;
+-	ep->driver_data = c->cdev;	/* claim */
+-	hidg->in_ep = ep;
+-
+-	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_out_ep_desc);
+-	if (!ep)
+-		goto fail;
+-	ep->driver_data = c->cdev;	/* claim */
+-	hidg->out_ep = ep;
+-
+-	/* preallocate request and buffer */
+-	status = -ENOMEM;
+-	hidg->req = usb_ep_alloc_request(hidg->in_ep, GFP_KERNEL);
+-	if (!hidg->req)
+-		goto fail;
+-
+-	hidg->req->buf = kmalloc(hidg->report_length, GFP_KERNEL);
+-	if (!hidg->req->buf)
+-		goto fail;
+-
+-	/* set descriptor dynamic values */
+-	hidg_interface_desc.bInterfaceSubClass = hidg->bInterfaceSubClass;
+-	hidg_interface_desc.bInterfaceProtocol = hidg->bInterfaceProtocol;
+-	hidg_hs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+-	hidg_fs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+-	hidg_hs_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+-	hidg_fs_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+-	hidg_desc.desc[0].bDescriptorType = HID_DT_REPORT;
+-	hidg_desc.desc[0].wDescriptorLength =
+-		cpu_to_le16(hidg->report_desc_length);
+-
+-	hidg_hs_in_ep_desc.bEndpointAddress =
+-		hidg_fs_in_ep_desc.bEndpointAddress;
+-	hidg_hs_out_ep_desc.bEndpointAddress =
+-		hidg_fs_out_ep_desc.bEndpointAddress;
+-
+-	status = usb_assign_descriptors(f, hidg_fs_descriptors,
+-			hidg_hs_descriptors, NULL);
+-	if (status)
+-		goto fail;
+-
+-	mutex_init(&hidg->lock);
+-	spin_lock_init(&hidg->spinlock);
+-	init_waitqueue_head(&hidg->write_queue);
+-	init_waitqueue_head(&hidg->read_queue);
+-	INIT_LIST_HEAD(&hidg->completed_out_req);
+-
+-	/* create char device */
+-	cdev_init(&hidg->cdev, &f_hidg_fops);
+-	dev = MKDEV(major, hidg->minor);
+-	status = cdev_add(&hidg->cdev, dev, 1);
+-	if (status)
+-		goto fail_free_descs;
+-
+-	device_create(hidg_class, NULL, dev, NULL, "%s%d", "hidg", hidg->minor);
+-
+-	return 0;
+-
+-fail_free_descs:
+-	usb_free_all_descriptors(f);
+-fail:
+-	ERROR(f->config->cdev, "hidg_bind FAILED\n");
+-	if (hidg->req != NULL) {
+-		kfree(hidg->req->buf);
+-		if (hidg->in_ep != NULL)
+-			usb_ep_free_request(hidg->in_ep, hidg->req);
+-	}
+-
+-	return status;
+-}
+-
+-static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
+-{
+-	struct f_hidg *hidg = func_to_hidg(f);
+-
+-	device_destroy(hidg_class, MKDEV(major, hidg->minor));
+-	cdev_del(&hidg->cdev);
+-
+-	/* disable/free request and end point */
+-	usb_ep_disable(hidg->in_ep);
+-	usb_ep_dequeue(hidg->in_ep, hidg->req);
+-	kfree(hidg->req->buf);
+-	usb_ep_free_request(hidg->in_ep, hidg->req);
+-
+-	usb_free_all_descriptors(f);
+-
+-	kfree(hidg->report_desc);
+-	kfree(hidg);
+-}
+-
+-/*-------------------------------------------------------------------------*/
+-/*                                 Strings                                 */
+-
+-#define CT_FUNC_HID_IDX	0
+-
+-static struct usb_string ct_func_string_defs[] = {
+-	[CT_FUNC_HID_IDX].s	= "HID Interface",
+-	{},			/* end of list */
+-};
+-
+-static struct usb_gadget_strings ct_func_string_table = {
+-	.language	= 0x0409,	/* en-US */
+-	.strings	= ct_func_string_defs,
+-};
+-
+-static struct usb_gadget_strings *ct_func_strings[] = {
+-	&ct_func_string_table,
+-	NULL,
+-};
+-
+-/*-------------------------------------------------------------------------*/
+-/*                             usb_configuration                           */
+-
+-int __init hidg_bind_config(struct usb_configuration *c,
+-			    struct hidg_func_descriptor *fdesc, int index)
+-{
+-	struct f_hidg *hidg;
+-	int status;
+-
+-	if (index >= minors)
+-		return -ENOENT;
+-
+-	/* maybe allocate device-global string IDs, and patch descriptors */
+-	if (ct_func_string_defs[CT_FUNC_HID_IDX].id == 0) {
+-		status = usb_string_id(c->cdev);
+-		if (status < 0)
+-			return status;
+-		ct_func_string_defs[CT_FUNC_HID_IDX].id = status;
+-		hidg_interface_desc.iInterface = status;
+-	}
+-
+-	/* allocate and initialize one new instance */
+-	hidg = kzalloc(sizeof *hidg, GFP_KERNEL);
+-	if (!hidg)
+-		return -ENOMEM;
+-
+-	hidg->minor = index;
+-	hidg->bInterfaceSubClass = fdesc->subclass;
+-	hidg->bInterfaceProtocol = fdesc->protocol;
+-	hidg->report_length = fdesc->report_length;
+-	hidg->report_desc_length = fdesc->report_desc_length;
+-	hidg->report_desc = kmemdup(fdesc->report_desc,
+-				    fdesc->report_desc_length,
+-				    GFP_KERNEL);
+-	if (!hidg->report_desc) {
+-		kfree(hidg);
+-		return -ENOMEM;
+-	}
+-
+-	hidg->func.name    = "hid";
+-	hidg->func.strings = ct_func_strings;
+-	hidg->func.bind    = hidg_bind;
+-	hidg->func.unbind  = hidg_unbind;
+-	hidg->func.set_alt = hidg_set_alt;
+-	hidg->func.disable = hidg_disable;
+-	hidg->func.setup   = hidg_setup;
+-
+-	/* this could me made configurable at some point */
+-	hidg->qlen	   = 4;
+-
+-	status = usb_add_function(c, &hidg->func);
+-	if (status)
+-		kfree(hidg);
+-
+-	return status;
+-}
+-
+-int __init ghid_setup(struct usb_gadget *g, int count)
+-{
+-	int status;
+-	dev_t dev;
+-
+-	hidg_class = class_create(THIS_MODULE, "hidg");
+-
+-	status = alloc_chrdev_region(&dev, 0, count, "hidg");
+-	if (!status) {
+-		major = MAJOR(dev);
+-		minors = count;
+-	}
+-
+-	return status;
+-}
+-
+-void ghid_cleanup(void)
+-{
+-	if (major) {
+-		unregister_chrdev_region(MKDEV(major, 0), minors);
+-		major = minors = 0;
+-	}
+-
+-	class_destroy(hidg_class);
+-	hidg_class = NULL;
+-}
+diff --git a/drivers/usb/gadget/function/f_hid.c.rej b/drivers/usb/gadget/function/f_hid.c.rej
+deleted file mode 100644
+index e881fbd9..00000000
+--- a/drivers/usb/gadget/function/f_hid.c.rej
++++ /dev/null
+@@ -1,26 +0,0 @@
+---- drivers/usb/gadget/function/f_hid.c
+-+++ drivers/usb/gadget/function/f_hid.c
+-@@ -264,13 +309,13 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+- 	 * call, taking into account its current read position.
+- 	 */
+- 	if (list->pos == req->actual) {
+--		kfree(list);
+-+ 		kfree(list);
+- 
+- 		req->length = hidg->report_length;
+- 		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
+- 		if (ret < 0) {
+- 			free_ep_req(hidg->out_ep, req);
+--			return ret;
+-+ 			return ret;
+- 		}
+- 	} else {
+- 		spin_lock_irqsave(&hidg->spinlock, flags);
+-@@ -560,6 +645,7 @@ static void hidg_disable(struct usb_function *f)
+- 
+- 	usb_ep_disable(hidg->out_ep);
+- 	hidg->out_ep->driver_data = NULL;
+-+
+- 	spin_lock_irqsave(&hidg->spinlock, flags);
+- 	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
+- 		free_ep_req(hidg->out_ep, list->req);
+-- 
+2.25.1
+
